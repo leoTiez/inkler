@@ -53,7 +53,7 @@ class BookBatch:
             mask[len(t.text):] = True
             self.masks.append(mask)
             self.scores.append(t.score)
-            self.genres.append(one_hot(torch.tensor(t.genre), num_classes=N_GENRES))
+            self.genres.append(one_hot(torch.tensor(t.genre), num_classes=N_GENRES).sum(dim=0).clip(min=0))
             if max_hierarchy is None:
                 max_hierarchy = np.zeros(len(t.hierarchy_ids[0]))
             hierarchy  = -np.ones((max_sentence, len(max_hierarchy)))
@@ -62,7 +62,7 @@ class BookBatch:
             max_hierarchy = max_hierarchy + np.max(t.hierarchy_ids, axis=0)
             self.postits.append(t.postit if t.postit is not None else -np.inf * np.ones(len(t.text[0])))
 
-        self.genres = torch.tensor(np.vstack(self.genres)).to(dtype)  # TODO COMBINE CORRECTLY
+        self.genres = torch.tensor(np.vstack(self.genres)).to(dtype)
         self.scores = torch.tensor(np.array(self.scores)).to(dtype)
         self.texts = torch.tensor(np.stack(self.texts)).to(dtype)
         self.hierarchy = torch.tensor(np.stack(self.hierarchy)).to(dtype)

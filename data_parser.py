@@ -8,8 +8,9 @@ import numpy as np
 import nltk
 nltk.download('punkt_tab')
 
-
 from inkler.constants import GENRES, GENRE_DICT
+
+
 def parse_args(args):
     parser = argparse.ArgumentParser("Parse txt documents to hierarchical document structure")
     parser.add_argument("--path", required=True, type=str,

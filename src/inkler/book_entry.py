@@ -31,6 +31,7 @@ class BookBatch:
     def __init__(
             self,
             book_entry_l: List[BookEntry],
+            scale: float = 0.01,
             dtype: torch.dtype = torch.float32
     ):
         self.titles = []
@@ -63,7 +64,7 @@ class BookBatch:
             self.postits.append(t.postit if t.postit is not None else -np.inf * np.ones(len(t.text[0])))
 
         self.genres = torch.tensor(np.vstack(self.genres)).to(dtype)
-        self.scores = torch.tensor(np.array(self.scores)).to(dtype)
+        self.scores = torch.tensor(np.array(self.scores)).to(dtype) * scale
         self.texts = torch.tensor(np.stack(self.texts)).to(dtype)
         self.hierarchy = torch.tensor(np.stack(self.hierarchy)).to(dtype)
         self.postits = torch.tensor(np.vstack(self.postits)).unsqueeze(1).to(dtype)

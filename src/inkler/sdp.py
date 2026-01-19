@@ -19,7 +19,7 @@ class Pooler(torch.nn.Module):
     ):
         super(Pooler, self).__init__()
         self.d_model = d_model
-        if pooling.lower() not in ["mean", "amax", "sum", "prod", "amin"]:
+        if pooling.lower() not in ["mean", "amax", "prod", "amin"]:
             raise ValueError("pooing not understood.")
 
         self.pooling = pooling.lower()
@@ -42,24 +42,21 @@ class Pooler(torch.nn.Module):
         min_val = torch.where(mask, document_id, torch.inf).min(-1)[0].to(torch.int)
         range_size = document_id.max(-1)[0] - min_val
         out_size = torch.max(range_size) + 1  # plus one to convert from index to size
-        t_ = torch.zeros((batch_size * out_size, x_dim), device=x_.device)
+        t_ = -torch.ones((batch_size * out_size, x_dim), device=x_.device)
 
         new_mask = torch.zeros((batch_size, out_size), dtype=torch.bool, device=x_.device)
         new_mask[torch.arange(out_size).reshape(1, -1) > range_size.reshape(-1, 1)] = True
         add_idx = -min_val.reshape(-1, 1) + torch.arange(batch_size).reshape(-1, 1) * (out_size - 1) + torch.arange(
             batch_size).reshape(-1, 1)
-        if self.pooling == "sum":
-            t_ = t_.index_add_(0, (document_id + add_idx)[mask].flatten(), x_[mask].reshape(-1, x_dim))
-        else:
-            t_ = t_.index_reduce_(
-                0,
-                (document_id + add_idx)[mask].flatten(),
-                x_[mask].reshape(-1, x_dim),
-                reduce=self.pooling,
-                include_self=False
-            )
+
+        t_.index_reduce_(
+            0,
+            (document_id + add_idx)[mask].flatten(),
+            x_[mask].reshape(-1, x_dim),
+            reduce=self.pooling,
+            include_self=False
+        )
         t_ = t_.reshape(batch_size, out_size, x_dim)
-        t_[new_mask] = -1.
         return t_, new_mask
 
 
@@ -75,7 +72,7 @@ class XCA(torch.nn.Module):
             self,
             d_model: int,
             n_heads: int = 8,
-            qkv_bias: bool =False,
+            qkv_bias: bool = False,
             attn_drop: float = 0.1,
             proj_drop: float = 0.1
     ):

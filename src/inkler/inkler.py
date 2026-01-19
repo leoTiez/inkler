@@ -41,7 +41,13 @@ class InklerScore(InklerOut):
 
 
 class InklerGenre(InklerOut):
-    def __init__(self, n_genre: int = 50, d_model: int = int(2**9), act_fn: str | Callable | None = None, norm_eps: float = 1e-6):
+    def __init__(
+            self,
+            n_genre: int = 50,
+            d_model: int = int(2**9),
+            act_fn: str | Callable | None = torch.sigmoid,
+            norm_eps: float = 1e-6
+    ):
         super(InklerGenre, self).__init__(d_model=d_model, act_fn=act_fn, norm_eps=norm_eps)
         self.out = torch.nn.Linear(d_model, n_genre)
 
@@ -152,7 +158,6 @@ class Inkler(pl.LightningModule):
             x_sentence: torch.Tensor,
             hierarchy: torch.Tensor,
             attention_mask: torch.Tensor,
-            postit: torch.Tensor | None = None,
     ) -> Dict:
         document_x = self.inkler_embedder(
             x=x_sentence,
@@ -164,12 +169,10 @@ class Inkler(pl.LightningModule):
         score = self.inkler_score(document_x)
         genre = self.inkler_genre(document_x)
 
-
         out_dict =  {
             "score": score,
             "genre": genre,
             "document_x": document_x,
-            "postit_embedding": postit,
         }
 
         return out_dict
@@ -179,14 +182,15 @@ class Inkler(pl.LightningModule):
             fwd_out: Dict,
             true_score: float | torch.Tensor,
             true_genre: torch.Tensor,
+            postits: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor]:
         score_e = self.huber_loss(fwd_out["score"], true_score.reshape(fwd_out["score"].shape))
         genre_e = self.class_loss(fwd_out["genre"], true_genre)
-        if fwd_out["postit_embedding"] is not None:
-            not_inf_mask = torch.isfinite(fwd_out["postit_embedding"])
-            postit_e = self.mse(fwd_out["postit_embedding"][not_inf_mask], fwd_out["document_x"][not_inf_mask])
-        else:
-            postit_e = 0.
+        postit_e = torch.tensor(0.)
+        if postits is not None:
+            not_inf_mask = torch.isfinite(postits)
+            if torch.any(not_inf_mask):
+                postit_e = self.mse(postits[not_inf_mask], fwd_out["document_x"][not_inf_mask])
         return {
             "score_loss": score_e,
             "genre_loss": genre_e,
@@ -202,13 +206,12 @@ class Inkler(pl.LightningModule):
             x_sentence=batch["texts"],
             hierarchy=batch["hierarchy"],
             attention_mask=batch["masks"],
-            postit=batch.get("postit", None),
-
         )
         loss = self.loss(
             fwd_out=result_dict,
             true_score=batch["scores"],
             true_genre=batch["genres"],
+            postits=batch.get("postits", None),
         )
         self.log(name="train_loss", value=loss["total_loss"], on_step=True, on_epoch=True, prog_bar=True)
         for loss_name, loss_val in loss.items():

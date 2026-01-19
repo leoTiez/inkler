@@ -5,6 +5,7 @@ import yaml
 import logging
 import argparse
 
+import torch.autograd
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import LearningRateMonitor
 from pytorch_lightning.loggers import CSVLogger
@@ -31,6 +32,7 @@ def parse_args(args):
     return parser.parse_args(args)
 
 def main(args):
+    torch.autograd.set_detect_anomaly(True)
     cnsl = logging.StreamHandler()
     logging.basicConfig(
         level=logging.INFO,
@@ -75,6 +77,7 @@ def main(args):
         logger=CSVLogger(save_dir=log_dir if log_dir is not None else "lightning_logs/"),
         callbacks=[LearningRateMonitor(logging_interval='step')]
     )
+
     trainer.fit(model=model, train_dataloaders=dataloader)
 
 

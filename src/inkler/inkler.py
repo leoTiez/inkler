@@ -31,7 +31,7 @@ class InklerOut(torch.nn.Module):
 
 
 class InklerScore(InklerOut):
-    def __init__(self, d_model: int = int(2**9), act_fn: str | Callable | None = None, norm_eps: float = 1e-6):
+    def __init__(self, d_model: int = int(2**9), act_fn: str | Callable | None = torch.sigmoid, norm_eps: float = 1e-6):
         super(InklerScore, self).__init__(d_model=d_model, act_fn=act_fn, norm_eps=norm_eps)
         self.out = torch.nn.Linear(d_model, 1)
 
@@ -213,12 +213,14 @@ class Inkler(pl.LightningModule):
             true_genre=batch["genres"],
             postits=batch.get("postits", None),
         )
-        self.log(name="train_loss", value=loss["total_loss"], on_step=True, on_epoch=True, prog_bar=True)
-        for loss_name, loss_val in loss.items():
-            if loss_name != "total_loss":
-                self.log(name=f"train_{loss_name}", value=loss_val, on_step=False, on_epoch=True, prog_bar=False)
+        loss_val = loss["total_loss"]
+        with torch.no_grad():
+            self.log(name="train_loss", value=loss["total_loss"], on_step=True, on_epoch=True, prog_bar=True)
+            for loss_name, loss_val in loss.items():
+                if loss_name != "total_loss":
+                    self.log(name=f"train_{loss_name}", value=loss_val, on_step=False, on_epoch=True, prog_bar=False)
 
-        return loss["total_loss"]
+        return loss_val
 
     @torch.no_grad()
     def validation_step(self, batch: Dict):

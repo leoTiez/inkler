@@ -8,6 +8,7 @@ from transformers.activations import ACT2FN
 import pytorch_lightning as pl
 
 from inkler import sdp
+from inkler.constants import N_GENRES
 
 
 class InklerOut(torch.nn.Module):
@@ -43,7 +44,7 @@ class InklerScore(InklerOut):
 class InklerGenre(InklerOut):
     def __init__(
             self,
-            n_genre: int = 50,
+            n_genre: int = N_GENRES,
             d_model: int = int(2**9),
             act_fn: str | Callable | None = torch.sigmoid,
             norm_eps: float = 1e-6
@@ -71,7 +72,7 @@ class Inkler(pl.LightningModule):
             score_act_fn: str = "relu",
             genre_act_fn: str = "relu",
             pooler_type: str = "token",
-            n_genre: int = 100,
+            n_genre: int = N_GENRES,
             dropout: float = 0.1,
             norm_eps: float = 1e-6,
             postit_weight: float = 1.,
@@ -98,7 +99,7 @@ class Inkler(pl.LightningModule):
         if n_hierarchy < 1:
             raise ValueError("n_hierarchy must be larger than 0")
         self.n_hierarchy = n_hierarchy
-        self.doc_token = torch.ones((1, 1, self.d_model)) * doc_token_fill
+        self.register_buffer("doc_token", torch.ones((1, 1, self.d_model)) * doc_token_fill)
         self.inkler_embedder = sdp.StructuralDocumentProcessor(
             d_model=self.d_model,
             n_heads=n_heads,

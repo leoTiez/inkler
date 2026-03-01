@@ -2,6 +2,8 @@ import numpy as np
 from typing import Tuple
 import torch
 
+from inkler.utils import index_reduce_mps
+
 
 def canonical_mask(mask: torch.Tensor, target_type: torch.dtype):
     if not torch.is_floating_point(mask):
@@ -45,17 +47,30 @@ class Pooler(torch.nn.Module):
         t_ = -torch.ones((batch_size * out_size, x_dim), device=x_.device)
 
         new_mask = torch.zeros((batch_size, out_size), dtype=torch.bool, device=x_.device)
-        new_mask[torch.arange(out_size).reshape(1, -1) > range_size.reshape(-1, 1)] = True
-        add_idx = -min_val.reshape(-1, 1) + torch.arange(batch_size).reshape(-1, 1) * (out_size - 1) + torch.arange(
-            batch_size).reshape(-1, 1)
+        new_mask[torch.arange(out_size, device=x_.device).reshape(1, -1) > range_size.reshape(-1, 1)] = True
+        add_idx = -min_val.reshape(-1, 1) + torch.arange(
+            batch_size,
+            device=x_.device
+        ).reshape(-1, 1) * (out_size - 1) + torch.arange(
+            batch_size,
+            device=x_.device
+        ).reshape(-1, 1)
 
-        t_.index_reduce_(
-            0,
-            (document_id + add_idx)[mask].flatten(),
-            x_[mask].reshape(-1, x_dim),
+        t_ = index_reduce_mps(
+            input=t_,
+            dim=0,
+            index=(document_id + add_idx)[mask].flatten(),
+            source=x_[mask].reshape(-1, x_dim),
             reduce=self.pooling,
             include_self=False
         )
+        # t_.index_reduce_(
+        #     0,
+        #     (document_id + add_idx)[mask].flatten(),
+        #     x_[mask].reshape(-1, x_dim),
+        #     reduce=self.pooling,
+        #     include_self=False
+        # )
         t_ = t_.reshape(batch_size, out_size, x_dim)
         return t_, new_mask
 
@@ -100,7 +115,10 @@ class XCA(torch.nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         # transpose and compute over features rather than seq
-        q.masked_fill_(mask.unsqueeze(-1).unsqueeze(1), 0.)
+        try:
+            q.masked_fill_(mask.unsqueeze(-1).unsqueeze(1), 0.)
+        except RuntimeError:
+            print("DOMMAGE")
         k.masked_fill_(mask.unsqueeze(-1).unsqueeze(1), 0.)
         q = q.transpose(-2, -1)
         k = k.transpose(-2, -1)
@@ -279,9 +297,9 @@ class SDPBlock(torch.nn.Module):
             mask_hierarchy: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor | None]:
         sentence_embedding = None
-        attention_mask_ = attention_mask.clone()
         if attention_mask.is_floating_point():
             attention_mask = attention_mask.to(torch.bool)
+        attention_mask_ = attention_mask.clone()
         attention_mask = ~attention_mask
         hid = hierarchy[..., -1]
         for i_d, st_layer in enumerate(self.st_layers):
@@ -296,17 +314,30 @@ class SDPBlock(torch.nn.Module):
                 token_size=hierarchy_x.shape[1]
             )
             if i_d < len(self.st_layers) - 1:
-                hid = -torch.ones(np.prod(x.shape[:2]))
+                hid = -torch.ones(np.prod(x.shape[:2]), device=x.device)
                 min_val = torch.where(attention_mask, hierarchy[..., -(i_d + 1)], torch.inf).min(-1)[0].to(torch.int)
                 add_idx = -min_val.reshape(-1, 1) + torch.arange(
-                    x.shape[0]).reshape(-1, 1) * (x.shape[1] - 1) + torch.arange(x.shape[0]).reshape(-1, 1) # TODO ADD AS ABOVE
-                hid = hid.index_reduce_(
-                    0,
-                    (hierarchy[..., -(i_d + 1)] + add_idx)[attention_mask].to(torch.int),
-                    hierarchy[..., -(i_d + 2)][attention_mask],
+                    x.shape[0],
+                    device=x.device,
+                ).reshape(-1, 1) * (x.shape[1] - 1) + torch.arange(
+                    x.shape[0],
+                    device=x.device,
+                ).reshape(-1, 1)
+                hid = index_reduce_mps(
+                    input=hid,
+                    dim=0,
+                    index=(hierarchy[..., -(i_d + 1)] + add_idx)[attention_mask].to(torch.int),
+                    source=hierarchy[..., -(i_d + 2)][attention_mask],
                     reduce="amax",
                     include_self=False
                 ).reshape(x.shape[:2])
+                # hid = hid.index_reduce_(
+                #     0,
+                #     (hierarchy[..., -(i_d + 1)] + add_idx)[attention_mask].to(torch.int),
+                #     hierarchy[..., -(i_d + 2)][attention_mask],
+                #     reduce="amax",
+                #     include_self=False
+                # ).reshape(x.shape[:2])
 
         return sentence_embedding, x
 

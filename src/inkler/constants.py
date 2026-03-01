@@ -44,7 +44,22 @@ GENRES = [
     "psychological",
     "absurd",
     "tragedy",
-    "period"
+    "period",
+    "stream of consciousness",
+    "existential",
+    "autofiction"
 ]
 
 GENRE_DICT = dict(zip(GENRES, range(len(GENRES))))
+
+SENTENCE_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
+
+ROMAN_MAP = {
+    "I": 1,
+    "V": 5,
+    "X": 10,
+    "L": 50,
+    "C": 100,
+    "D": 500,
+    "M": 1000
+}

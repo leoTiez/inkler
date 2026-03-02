@@ -95,10 +95,17 @@ def main(args):
                 stripped = strip_line(sentence)
                 if "*** END OF THE PROJECT GUTENBERG EBOOK" in stripped:
                     break
+                if is_empty(sentence):
+                    continue
                 if stripped.lower().startswith("chapter") or stripped.lower().startswith("kapitel") or stripped.lower().startswith("chapitre") or roman_to_int(stripped.upper().replace(".", "")) is not None:
                     chapter_cntr += 1
-                    continue
-                if "\n\n" in sentence:
+                    split_list = sentence.split("\n\n")
+                    split_list = [strip_line(s) for s in split_list if not is_empty(strip_line(s))]
+                    if len(split_list) > 1:
+                        striped = strip_line(" ".join(split_list[1:]))
+                    else:
+                        continue
+                elif "\n\n" in sentence:
                     split_sentences = sentence.split("\n\n")
                     for s in split_sentences:
                         if is_empty(s):

@@ -1,4 +1,3 @@
-N_GENRES = 50
 GENRES = [
     "non-fiction",
     "essay",
@@ -47,8 +46,12 @@ GENRES = [
     "period",
     "stream of consciousness",
     "existential",
-    "autofiction"
+    "autofiction",
+    "war",
+    "modern"
 ]
+
+N_GENRES = len(GENRES)
 
 GENRE_DICT = dict(zip(GENRES, range(len(GENRES))))
 

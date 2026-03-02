@@ -2,6 +2,8 @@ from inkler.constants import ROMAN_MAP
 
 
 def roman_to_int(s: str):
+    if len(s) == 0:
+        return None
     res = 0
     i = 0
     while i < len(s):

@@ -45,6 +45,9 @@ class BookBatch:
         max_sentence = max(len(t.text) for t in book_entry_l)
         max_hierarchy = None
         for it, t in enumerate(book_entry_l):
+            for hid in np.array(t.hierarchy_ids).T:
+                if np.max(hid) + 1 > len(np.unique(hid)):
+                    raise ValueError(f"There are hierarchy gaps for {t.title} by {t.author}")
             self.titles.append(t.title)
             self.authors.append(t.author)
             text = -np.ones((max_sentence, len(t.text[0])))

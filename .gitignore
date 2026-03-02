@@ -5,3 +5,6 @@ __pycache
 src/__pycache__
 src/inkler/__pycache__
 experiments
+data
+.inkler
+.DS_Store

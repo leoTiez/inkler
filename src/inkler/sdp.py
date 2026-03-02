@@ -2,6 +2,8 @@ import numpy as np
 from typing import Tuple
 import torch
 
+from inkler.utils import index_reduce_mps
+
 
 def canonical_mask(mask: torch.Tensor, target_type: torch.dtype):
     if not torch.is_floating_point(mask):
@@ -31,6 +33,8 @@ class Pooler(torch.nn.Module):
             mask: torch.Tensor | None = None,
             token_size: int = 1
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Pool results over indices"""
+        # do not include cls token for pooling
         x_ = x[:, token_size:]  # remove hierarchy
         batch_size, seq_len, x_dim = x_.shape
         if mask is None:
@@ -39,23 +43,34 @@ class Pooler(torch.nn.Module):
             mask = mask.to(torch.bool)
         mask = ~mask
         document_id = document_id.to(torch.int)
+        # select how far indices range per data point in batch
         min_val = torch.where(mask, document_id, torch.inf).min(-1)[0].to(torch.int)
         range_size = document_id.max(-1)[0] - min_val
+        # create new output tensor that is as big as max range
         out_size = torch.max(range_size) + 1  # plus one to convert from index to size
         t_ = -torch.ones((batch_size * out_size, x_dim), device=x_.device)
 
+        # set mask such that values that don't reach out_size are masked out
         new_mask = torch.zeros((batch_size, out_size), dtype=torch.bool, device=x_.device)
-        new_mask[torch.arange(out_size).reshape(1, -1) > range_size.reshape(-1, 1)] = True
-        add_idx = -min_val.reshape(-1, 1) + torch.arange(batch_size).reshape(-1, 1) * (out_size - 1) + torch.arange(
-            batch_size).reshape(-1, 1)
+        new_mask[torch.arange(out_size, device=x_.device).reshape(1, -1) > range_size.reshape(-1, 1)] = True
+        # calculate offset indices to collate data values
+        # offset is -min_val.reshape(-1, 1) for resetting to zero + size of new collated output tensor
+        add_idx = -min_val.reshape(-1, 1) + torch.arange(
+            batch_size,
+            device=x_.device
+        ).reshape(-1, 1) * out_size
 
-        t_.index_reduce_(
-            0,
-            (document_id + add_idx)[mask].flatten(),
-            x_[mask].reshape(-1, x_dim),
+        # collate data values over indices that are aggregated over hierarchical document ids + offset,
+        # index_reduce_mps is an mps-friendly implementation of the index_reduce tensor function
+        t_ = index_reduce_mps(
+            input=t_,
+            dim=0,
+            index=(document_id + add_idx)[mask].flatten(),
+            source=x_[mask].reshape(-1, x_dim),
             reduce=self.pooling,
             include_self=False
         )
+        # reshape
         t_ = t_.reshape(batch_size, out_size, x_dim)
         return t_, new_mask
 
@@ -100,6 +115,7 @@ class XCA(torch.nn.Module):
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         # transpose and compute over features rather than seq
+        # apply mask over sequence dimension
         q.masked_fill_(mask.unsqueeze(-1).unsqueeze(1), 0.)
         k.masked_fill_(mask.unsqueeze(-1).unsqueeze(1), 0.)
         q = q.transpose(-2, -1)
@@ -170,6 +186,8 @@ class StructureTransformer(torch.nn.Module):
         self.dropout = dropout
         self.skip1_norm = torch.nn.LayerNorm(self.d_model)
         self.skip2_norm = torch.nn.LayerNorm(self.d_model)
+        # use xca or conventional attention depending on how large sequence is.
+        # sentences or paragraphs benefit from xca implementation
         if use_xca:
             self.structure_attention = XCA(
                 d_model=self.d_model,
@@ -202,6 +220,7 @@ class StructureTransformer(torch.nn.Module):
     ) -> torch.Tensor:
         batch_size, seq_len, x_dim = x.shape
         if attention_mask is not None:
+            # add class token mask
             attention_mask = torch.hstack([
                 torch.zeros(batch_size, hierarchy_x.shape[1], dtype=attention_mask.dtype, device=attention_mask.device),
                 attention_mask
@@ -209,6 +228,8 @@ class StructureTransformer(torch.nn.Module):
         else:
             attention_mask = torch.zeros(batch_size, seq_len + hierarchy_x.shape[1], dtype=torch.bool, device=x.device)
 
+        # mask hierarchy token if set. for first layer
+        # useful
         if mask_hierarchy:
             attention_mask[:, :hierarchy_x.shape[1]] = torch.ones(
                 hierarchy_x.shape[1],
@@ -223,12 +244,12 @@ class StructureTransformer(torch.nn.Module):
             mask=attention_mask,
         )
 
-        # skip connection
+        # skip connection without class token
         x_[:, hierarchy_x.shape[1]:, :] = x_[:, hierarchy_x.shape[1]:, :] + x
         x_ = self.skip1_norm(x_)
         x_ = self.mlp(x_)
 
-        # skip connection
+        # skip connection without class token
         x_[:, hierarchy_x.shape[1]:, :] = x_[:, hierarchy_x.shape[1]:, :] + x
         return self.skip2_norm(x_)
 
@@ -247,6 +268,7 @@ class SDPBlock(torch.nn.Module):
         super(SDPBlock, self).__init__()
         if n_xca > n_hierarchy:
             raise ValueError("n_xca must be less than or equal to n_hierarchy")
+        # first xca based transformer
         struture_embedding = [StructureTransformer(
             d_model=d_model,
             n_heads=n_heads,
@@ -254,6 +276,7 @@ class SDPBlock(torch.nn.Module):
             dropout=dropout,
             use_xca=True
         ) for _ in range(n_xca)]
+        # then attention based transformer when sequence length has been reduced
         st_layers = [
             StructureTransformer(
                 d_model=d_model,
@@ -279,35 +302,49 @@ class SDPBlock(torch.nn.Module):
             mask_hierarchy: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor | None]:
         sentence_embedding = None
-        attention_mask_ = attention_mask.clone()
         if attention_mask.is_floating_point():
             attention_mask = attention_mask.to(torch.bool)
+        # two attention masks, one that remains in passed dimensionality
+        # the other shrinks with structural processing depth when sentences, paragraphs and chapters are collated
+        attention_mask_ = attention_mask.clone()
         attention_mask = ~attention_mask
+        # fetch lowest hierarchy which are paragraphs
         hid = hierarchy[..., -1]
         for i_d, st_layer in enumerate(self.st_layers):
+            # hierarchy attention
             x = st_layer(x, hierarchy_x, attention_mask_, mask_hierarchy=mask_hierarchy)
             if i_d == 0:
-                # remove hierarchy token
-                sentence_embedding = x.clone()[:, 1:, :]
+                # fetch sentence embedding that is used as input for next layer
+                # when i_d > 0, x continues being aggregated over hierarchy ids until class token is found
+                sentence_embedding = x.clone()[:, 1:, :]  # remove hierarchy token
+
+            # pool embedding over hierarchy ides
             x, attention_mask_ = self.pool(
                 x,
                 hid,
                 mask=attention_mask_,
                 token_size=hierarchy_x.shape[1]
             )
+            # adapt hierarchy ids to new layout
             if i_d < len(self.st_layers) - 1:
-                hid = -torch.ones(np.prod(x.shape[:2]))
+                # compute offset and collation as for the pooling but mus be performed over unchanged attention masl
+                hid = -torch.ones(np.prod(x.shape[:2]), device=x.device)
                 min_val = torch.where(attention_mask, hierarchy[..., -(i_d + 1)], torch.inf).min(-1)[0].to(torch.int)
                 add_idx = -min_val.reshape(-1, 1) + torch.arange(
-                    x.shape[0]).reshape(-1, 1) * (x.shape[1] - 1) + torch.arange(x.shape[0]).reshape(-1, 1) # TODO ADD AS ABOVE
-                hid = hid.index_reduce_(
-                    0,
-                    (hierarchy[..., -(i_d + 1)] + add_idx)[attention_mask].to(torch.int),
-                    hierarchy[..., -(i_d + 2)][attention_mask],
+                    x.shape[0],
+                    device=x.device,
+                ).reshape(-1, 1) * x.shape[1]
+                # collate indices
+                hid = index_reduce_mps(
+                    input=hid,
+                    dim=0,
+                    index=(hierarchy[..., -(i_d + 1)] + add_idx)[attention_mask].to(torch.int),
+                    source=hierarchy[..., -(i_d + 2)][attention_mask],
                     reduce="amax",
                     include_self=False
                 ).reshape(x.shape[:2])
 
+        # return sentence embedding and class token
         return sentence_embedding, x
 
 
@@ -374,6 +411,7 @@ class StructuralDocumentProcessor(torch.nn.Module):
         # add lowest hierarchy to position
         x = x + pe + hierarchy[:, :, -1].unsqueeze(-1)
         for i_block, sdp_block in enumerate(self.sdp_blocks):
+            # x is new sentence embedding, hierarchy_x is new class token
             x, hierarchy_x = sdp_block(x, hierarchy_x, hierarchy, attention_mask, mask_hierarchy=i_block == 0)
 
         return hierarchy_x

@@ -59,8 +59,10 @@ class BookBatch:
                 max_hierarchy = np.zeros(len(t.hierarchy_ids[0]))
             hierarchy  = -np.ones((max_sentence, len(max_hierarchy)))
             hierarchy[:len(t.hierarchy_ids)] = np.array(t.hierarchy_ids) + max_hierarchy
-            self.hierarchy.append(np.vstack([it * np.ones(max_sentence), hierarchy.T]).T)
-            max_hierarchy = max_hierarchy + np.max(t.hierarchy_ids, axis=0)
+            document_id = -np.ones(max_sentence)
+            document_id[:len(t.hierarchy_ids)] = it * np.ones(len(t.hierarchy_ids))
+            self.hierarchy.append(np.vstack([document_id, hierarchy.T]).T)
+            max_hierarchy = max_hierarchy + np.max(t.hierarchy_ids, axis=0) + 1
             self.postits.append(t.postit if t.postit is not None else -np.inf * np.ones(len(t.text[0])))
 
         self.genres = torch.tensor(np.vstack(self.genres)).to(dtype)

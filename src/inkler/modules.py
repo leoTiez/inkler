@@ -1,0 +1,171 @@
+from typing import Tuple
+import torch
+
+from inkler.utils import index_reduce_mps, canonical_mask
+
+
+class LPI(torch.nn.Module):
+    """
+    local patch interaction
+    """
+    def __init__(self, d_model, ks=5):
+        super().__init__()
+        self.d_model = d_model
+        self.ks = ks
+        self.conv = torch.nn.Conv1d(
+            in_channels=self.d_model,
+            out_channels=self.d_model,
+            kernel_size=self.ks,
+            padding=self.ks // 2,
+            groups=self.d_model  # independent convolution per channels
+        )
+        self.act = torch.nn.GELU()
+
+    def forward(self, x, mask):
+        x = self.conv(x.masked_fill(mask.unsqueeze(-1), 0.).transpose(-1, -2))
+        return self.act(x).transpose(-1, -2)
+
+
+class Pooler(torch.nn.Module):
+    def __init__(
+            self,
+            d_model: int,
+            pooling: str = "amax",
+    ):
+        super(Pooler, self).__init__()
+        self.d_model = d_model
+        if pooling.lower() not in ["mean", "amax", "prod", "amin"]:
+            raise ValueError("pooling not understood.")
+
+        self.pooling = pooling.lower()
+
+    def forward(
+            self,
+            x: torch.Tensor,
+            document_id: torch.Tensor,
+            mask: torch.Tensor | None = None,
+            token_size: int = 1
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Pool results over indices"""
+        # do not include cls token for pooling
+        x_ = x[:, token_size:]  # remove hierarchy
+        batch_size, seq_len, x_dim = x_.shape
+        if mask is None:
+            mask = torch.zeros(x_.shape[:-1], device=x_.device, dtype=torch.bool)
+        if mask.is_floating_point():
+            mask = mask.to(torch.bool)
+        mask = ~mask
+        document_id = document_id.to(torch.int)
+        # select how far indices range per data point in batch
+        min_val = torch.where(mask, document_id, torch.inf).min(-1)[0].to(torch.int)
+        range_size = document_id.max(-1)[0] - min_val
+        # create new output tensor that is as big as max range
+        out_size = int(torch.max(range_size) + 1)  # plus one to convert from index to size
+        t_ = -torch.ones((batch_size * out_size, x_dim), device=x_.device)
+
+        # set mask such that values that don't reach out_size are masked out
+        new_mask = torch.zeros((batch_size, out_size), dtype=torch.bool, device=x_.device)
+        new_mask[torch.arange(out_size, device=x_.device).reshape(1, -1) > range_size.reshape(-1, 1)] = True
+        # calculate offset indices to collate data values
+        # offset is -min_val.reshape(-1, 1) for resetting to zero + size of new collated output tensor
+        add_idx = -min_val.reshape(-1, 1) + torch.arange(
+            batch_size,
+            device=x_.device
+        ).reshape(-1, 1) * out_size
+
+        # collate data values over indices that are aggregated over hierarchical document ids + offset,
+        # index_reduce_mps is an mps-friendly implementation of the index_reduce tensor function
+        t_ = index_reduce_mps(
+            input=t_,
+            dim=0,
+            index=(document_id + add_idx)[mask].flatten(),
+            source=x_[mask].reshape(-1, x_dim),
+            reduce=self.pooling,
+            include_self=False
+        )
+        # reshape
+        t_ = t_.reshape(batch_size, out_size, x_dim)
+        return t_, new_mask
+
+
+class XCA(torch.nn.Module):
+    """ Cross-Covariance Attention (XCA) operation where the channels are updated using a weighted
+     sum. The weights are obtained from the (softmax normalized) Cross-covariance
+    matrix (Q^T K \\in d_h \\times d_h)
+
+    taken from the xcit paper
+    """
+
+    def __init__(
+            self,
+            d_model: int,
+            n_heads: int = 8,
+            qkv_bias: bool = False,
+            attn_drop: float = 0.1,
+            proj_drop: float = 0.1,
+            ks: int = 7,
+    ):
+        super().__init__()
+        if d_model < 1:
+            raise ValueError("d_model must be a positive integer")
+        self.d_model = d_model
+
+        if n_heads < 1:
+            raise ValueError("n_heads must be a positive integer")
+        self.n_heads = n_heads
+        self.temperature = torch.nn.Parameter(torch.ones(n_heads, 1, 1))
+
+        self.qkv = torch.nn.Linear(self.d_model, self.d_model * 3, bias=qkv_bias)  # times 3 for Q, K, and V
+        self.attn_drop = torch.nn.Dropout(attn_drop)
+        self.proj = torch.nn.Linear(self.d_model, self.d_model)
+        self.proj_drop = torch.nn.Dropout(proj_drop)
+        self.lpi = LPI(self.d_model, ks=ks)
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+        batch_size, seq_len, x_dim = x.shape
+        mask = mask if mask is not None else torch.zeros_like(x[..., -1])
+        mask = canonical_mask(mask, target_type=mask.dtype)
+        qkv = self.qkv(x).reshape(batch_size, seq_len, 3, self.n_heads, x_dim // self.n_heads)
+        qkv = qkv.permute(2, 0, 3, 1, 4)  # size (q, k, v) x batch x heads x seq x model_d / n_heads
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        # transpose and compute over features rather than seq
+        # apply mask over sequence dimension
+        q.masked_fill_(mask.unsqueeze(-1).unsqueeze(1), 0.)
+        k.masked_fill_(mask.unsqueeze(-1).unsqueeze(1), 0.)
+        q = q.transpose(-2, -1)
+        k = k.transpose(-2, -1)
+        v = v.transpose(-2, -1)
+
+        q = torch.nn.functional.normalize(q, dim=-1)
+        k = torch.nn.functional.normalize(k, dim=-1)
+
+        attn = (q @ k.transpose(-2, -1)) * self.temperature
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).permute(0, 3, 1, 2).reshape(batch_size, seq_len, x_dim)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        x = self.lpi(x, mask)  # local patch interaction
+        return x
+
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        return {'temperature'}
+
+
+class AttentionWrapper(torch.nn.Module):
+    def __init__(self, d_model: int, n_heads: int, dropout: float = .1):
+        super(AttentionWrapper, self).__init__()
+        self.multihead_attn = torch.nn.MultiheadAttention(
+            embed_dim=d_model,
+            num_heads=n_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        mask = mask if mask is not None else torch.zeros_like(x[..., -1])
+        mask = canonical_mask(mask, target_type=mask.dtype)
+        return self.multihead_attn(x, x, x, key_padding_mask=mask)[0]

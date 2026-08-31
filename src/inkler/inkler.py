@@ -1,6 +1,4 @@
-from abc import ABC
-from typing import Callable, Any, List, Tuple, Dict
-from pathlib import Path
+from typing import Callable, Tuple, Dict
 
 import torch
 from pytorch_lightning.utilities.types import OptimizerLRScheduler
@@ -71,7 +69,7 @@ class Inkler(pl.LightningModule):
             lr: float = 1e-4,
             score_act_fn: str = "relu",
             genre_act_fn: str = "relu",
-            pooler_type: str = "token",
+            pooler_type: str = "amax",
             n_genre: int = N_GENRES,
             dropout: float = 0.1,
             norm_eps: float = 1e-6,
@@ -79,6 +77,7 @@ class Inkler(pl.LightningModule):
             score_weight: float = 1.,
             genre_weight: float = 1.,
             betas: Tuple[float, float] = (.9, 0.999),
+            huber_beta: float = .01,
             optim_params: Dict = {},
             scheduler_params: Dict = {},
             **kwargs
@@ -132,26 +131,26 @@ class Inkler(pl.LightningModule):
         self.genre_w = genre_weight
         self.postit_w = postit_weight
         self.class_loss = torch.nn.CrossEntropyLoss()
-        self.huber_loss = torch.nn.SmoothL1Loss()
+        self.huber_loss = torch.nn.SmoothL1Loss(beta=huber_beta)
         self.mse = torch.nn.MSELoss()
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
-        optimizer = torch.optim.AdamW(
+        optimizer = torch.optim.RAdam(
             self.parameters(),
             lr=self.lr,
             betas=self.betas,
             **self.optim_dict,
         )
-        scheduler = torch.optim.lr_scheduler.CyclicLR(
-            optimizer=optimizer,
-            **self.scheduler_dict
-        )
+        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        #     optimizer=optimizer,
+        #     **self.scheduler_dict
+        # )
         return {
             "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "step",
-            }
+            # "lr_scheduler": {
+            #     "scheduler": scheduler,
+            #     "interval": "step",
+            # }
         }
 
     def forward(
@@ -214,30 +213,29 @@ class Inkler(pl.LightningModule):
             true_genre=batch["genres"],
             postits=batch.get("postits", None),
         )
-        loss_val = loss["total_loss"]
         with torch.no_grad():
             self.log(name="train_loss", value=loss["total_loss"], on_step=True, on_epoch=True, prog_bar=True)
             for loss_name, loss_val in loss.items():
                 if loss_name != "total_loss":
-                    self.log(name=f"train_{loss_name}", value=loss_val, on_step=False, on_epoch=True, prog_bar=False)
+                    self.log(name=f"train_{loss_name}", value=loss_val, on_step=True, on_epoch=True, prog_bar=True)
 
-        return loss_val
+        return loss["total_loss"]
 
     @torch.no_grad()
     def validation_step(self, batch: Dict):
         result_dict = self(
-            x_sentence=batch["text"],
-            document_ids=batch["document_ids"],
-            attention_mask=batch["attention_mask"],
-            postit=batch.get("postit", None)
+            x_sentence=batch["texts"],
+            hierarchy=batch["hierarchy"],
+            attention_mask=batch["masks"],
         )
         loss = self.loss(
             fwd_out=result_dict,
-            true_score=batch["score"],
-            true_genre=batch["genre"],
+            true_score=batch["scores"],
+            true_genre=batch["genres"],
+            postits=batch.get("postits", None),
         )
         for loss_name, loss_val in loss.items():
-            self.log(name=f"val_{loss_name}", value=loss_val, on_step=False, on_epoch=True, prog_bar=False)
+            self.log(name=f"val_{loss_name}", value=loss_val, on_step=True, on_epoch=True, prog_bar=True)
 
         return loss["total_loss"]
 

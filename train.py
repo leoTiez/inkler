@@ -9,6 +9,7 @@ import torch.autograd
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import LearningRateMonitor
 from pytorch_lightning.loggers import CSVLogger
+from pytorch_lightning.callbacks import ModelCheckpoint
 
 from inkler.inkler import Inkler
 from inkler.book_entry import BookDataset
@@ -55,7 +56,13 @@ def main(args):
     dataloader = BookDataset(
         seq_len=int(train_dict["model"]["seq_len"]),
         in_dim=int(train_dict["model"]["d_model"]),
-        **train_dict["data"]
+        **train_dict["train_data"]
+    )
+
+    val_dataloader = BookDataset(
+        seq_len=int(train_dict["model"]["seq_len"]),
+        in_dim=int(train_dict["model"]["d_model"]),
+        **train_dict["val_data"]
     )
     logger.info(f"Loaded training set with {len(dataloader)} entries")
 
@@ -70,15 +77,32 @@ def main(args):
     del train_dict["train"]["optim_params"]
     del train_dict["train"]["scheduler_params"]
     log_dir = train_dict["train"].get("logging_dir", None)
+    name = train_dict["name"]
     if "logging_dir" in train_dict["train"]:
         del train_dict["train"]["logging_dir"]
+    if isinstance(log_dir, str):
+        log_dir = os.path.join(log_dir, name)
+        checkpoint_dir = os.path.join(log_dir, "checkpoints")
+    else:
+        checkpoint_dir = "lightning_logs/checkpoints"
+    # saves top-K checkpoints based on "val_loss" metric
+    checkpoint_callback = ModelCheckpoint(
+        **train_dict["train"]["checkpoint"],
+        dirpath=checkpoint_dir,
+        filename=name + "-{epoch:02d}-{val_loss:.2f}",
+    )
+    del train_dict["train"]["checkpoint"]
+
     trainer = Trainer(
         **train_dict["train"],
         logger=CSVLogger(save_dir=log_dir if log_dir is not None else "lightning_logs/"),
-        callbacks=[LearningRateMonitor(logging_interval='step')]
+        callbacks=[
+            LearningRateMonitor(logging_interval="step"),
+            checkpoint_callback
+        ]
     )
 
-    trainer.fit(model=model, train_dataloaders=dataloader)
+    trainer.fit(model=model, train_dataloaders=dataloader, val_dataloaders=val_dataloader)
 
 
 

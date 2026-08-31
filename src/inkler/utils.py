@@ -42,6 +42,14 @@ def broadcast_index(index: torch.Tensor, source: torch.Tensor):
     return index.expand_as(source)
 
 
+def canonical_mask(mask: torch.Tensor, target_type: torch.dtype):
+    if not torch.is_floating_point(mask):
+        mask = torch.zeros_like(mask, dtype=target_type).masked_fill_(
+            mask, float("-inf")
+        )
+    return mask.to(target_type)
+
+
 def index_reduce_mps(
         input: torch.Tensor,
         dim: int,

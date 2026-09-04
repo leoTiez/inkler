@@ -189,10 +189,11 @@ class SDPBlock(torch.nn.Module):
                 hid = index_reduce_mps(
                     input=hid,
                     dim=0,
-                    index=(hierarchy[..., -(i_d + 1)] + add_idx)[attention_mask].to(torch.int),
-                    source=hierarchy[..., -(i_d + 2)][attention_mask],
+                    index=(hierarchy[..., -(i_d + 1)] + add_idx).to(torch.int).flatten(),
+                    source=hierarchy[..., -(i_d + 2)].flatten(),
                     reduce="amax",
-                    include_self=False
+                    include_self=False,
+                    mask=attention_mask.flatten(),
                 ).reshape(x.shape[:2])
 
         # return sentence embedding and class token

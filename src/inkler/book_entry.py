@@ -136,6 +136,7 @@ class BookDataset:
             self.idx = np.arange(len(self.book_entry_path_l))
         else:
             self.idx = np.random.permutation(len(self.book_entry_path_l))
+        self.n_books = len(self.book_entry_path_l)
         self.pending_book_entries = []
         self.pool = ThreadPool(processes=self.n_cpu)
         self.epoch = 0
@@ -159,7 +160,7 @@ class BookDataset:
             self.current_idx += 1
 
     def __len__(self):
-        return len(self.book_entry_path_l)
+        return len(self.book_entry_path_l) // self.batch_size
 
     def __enter__(self):
         return self
@@ -185,8 +186,7 @@ class BookDataset:
                         del self.pending_book_entries[i_be]
                         if len(results) >= self.batch_size:
                             break
-                time.sleep(0.01)
-
+                time.sleep(0.0001)
         self.preload_book_entries()
         return BookBatch(results).get_dict()
 

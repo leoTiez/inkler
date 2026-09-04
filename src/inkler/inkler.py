@@ -130,7 +130,7 @@ class Inkler(pl.LightningModule):
         self.score_w = score_weight
         self.genre_w = genre_weight
         self.postit_w = postit_weight
-        self.class_loss = torch.nn.CrossEntropyLoss()
+        self.class_loss = torch.nn.BCELoss(reduction="mean")
         self.huber_loss = torch.nn.SmoothL1Loss(beta=huber_beta)
         self.mse = torch.nn.MSELoss()
 
@@ -188,9 +188,18 @@ class Inkler(pl.LightningModule):
         genre_e = self.class_loss(fwd_out["genre"], true_genre)
         postit_e = torch.tensor(0.)
         if postits is not None:
+            # Equivalent to `self.mse(postits[not_inf_mask], document_x[not_inf_mask])`
+            # guarded by `if torch.any(not_inf_mask)`, but avoids the boolean-mask
+            # compaction (`nonzero`) and the `if tensor:` host sync, both of which
+            # block the accelerator pipeline on every training step.
             not_inf_mask = torch.isfinite(postits)
-            if torch.any(not_inf_mask):
-                postit_e = self.mse(postits[not_inf_mask], fwd_out["document_x"][not_inf_mask])
+            sq_err = torch.where(
+                not_inf_mask,
+                (postits.masked_fill(~not_inf_mask, 0.) - fwd_out["document_x"].masked_fill(~not_inf_mask, 0.)) ** 2,
+                torch.zeros_like(postits),
+            )
+            count = not_inf_mask.sum().clamp(min=1).to(sq_err.dtype)
+            postit_e = sq_err.sum() / count
         return {
             "score_loss": score_e,
             "genre_loss": genre_e,
@@ -207,19 +216,19 @@ class Inkler(pl.LightningModule):
             hierarchy=batch["hierarchy"],
             attention_mask=batch["masks"],
         )
-        loss = self.loss(
+        loss_dict = self.loss(
             fwd_out=result_dict,
             true_score=batch["scores"],
             true_genre=batch["genres"],
             postits=batch.get("postits", None),
         )
         with torch.no_grad():
-            self.log(name="train_loss", value=loss["total_loss"], on_step=True, on_epoch=True, prog_bar=True)
-            for loss_name, loss_val in loss.items():
+            self.log(name="train_loss", value=loss_dict["total_loss"], on_step=True, on_epoch=False, prog_bar=True)
+            for loss_name, loss_val in loss_dict.items():
                 if loss_name != "total_loss":
                     self.log(name=f"train_{loss_name}", value=loss_val, on_step=True, on_epoch=True, prog_bar=True)
 
-        return loss["total_loss"]
+        return loss_dict["total_loss"]
 
     @torch.no_grad()
     def validation_step(self, batch: Dict):
@@ -235,7 +244,7 @@ class Inkler(pl.LightningModule):
             postits=batch.get("postits", None),
         )
         for loss_name, loss_val in loss.items():
-            self.log(name=f"val_{loss_name}", value=loss_val, on_step=True, on_epoch=True, prog_bar=True)
+            self.log(name=f"val_{loss_name}", value=loss_val, on_step=False, on_epoch=True, prog_bar=True)
 
         return loss["total_loss"]
 

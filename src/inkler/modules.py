@@ -64,8 +64,9 @@ class Pooler(torch.nn.Module):
         t_ = -torch.ones((batch_size * out_size, x_dim), device=x_.device)
 
         # set mask such that values that don't reach out_size are masked out
-        new_mask = torch.zeros((batch_size, out_size), dtype=torch.bool, device=x_.device)
-        new_mask[torch.arange(out_size, device=x_.device).reshape(1, -1) > range_size.reshape(-1, 1)] = True
+        # (equivalent to filling a zeros tensor via a boolean-mask assignment, but
+        # avoids the `nonzero` this triggers via boolean indexing on MPS/CUDA)
+        new_mask = torch.arange(out_size, device=x_.device).reshape(1, -1) > range_size.reshape(-1, 1)
         # calculate offset indices to collate data values
         # offset is -min_val.reshape(-1, 1) for resetting to zero + size of new collated output tensor
         add_idx = -min_val.reshape(-1, 1) + torch.arange(
@@ -78,10 +79,11 @@ class Pooler(torch.nn.Module):
         t_ = index_reduce_mps(
             input=t_,
             dim=0,
-            index=(document_id + add_idx)[mask].flatten(),
-            source=x_[mask].reshape(-1, x_dim),
+            index=(document_id + add_idx).flatten(),
+            source=x_.reshape(-1, x_dim),
             reduce=self.pooling,
-            include_self=False
+            include_self=False,
+            mask=mask.flatten(),
         )
         # reshape
         t_ = t_.reshape(batch_size, out_size, x_dim)

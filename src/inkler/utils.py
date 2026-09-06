@@ -1,3 +1,4 @@
+import subprocess
 import torch
 
 from inkler.constants import ROMAN_MAP
@@ -57,7 +58,25 @@ def index_reduce_mps(
         source: torch.Tensor,
         reduce: str ="sum",
         include_self: bool = False,
+        mask: torch.Tensor | None = None,
 ):
+    """
+    index_reduce with an optional `mask` selecting which (index, source) pairs
+    participate. Entries where `mask` is False are redirected into an extra
+    scratch bucket appended along `dim` (instead of compacting them out via
+    boolean indexing beforehand, e.g. ``source[mask]``). Boolean-mask
+    compaction lowers to `nonzero`, which forces a blocking host<->device
+    sync on MPS/CUDA; on long book sequences these syncs dominate wall time
+    far more than the actual reduction. Redirecting keeps everything as
+    static-shaped ops and is numerically identical to masking first.
+    """
+    if mask is not None:
+        garbage = input.shape[dim]
+        pad_shape = list(input.shape)
+        pad_shape[dim] = 1
+        input = torch.cat([input, input.new_zeros(pad_shape)], dim=dim)
+        index = torch.where(mask, index, torch.full_like(index, garbage))
+
     out = input.clone()
     index_expanded = broadcast_index(index=index, source=source)
 
@@ -86,4 +105,11 @@ def index_reduce_mps(
     else:
         raise NotImplementedError(f"{reduce} not supported")
 
+    if mask is not None:
+        out = out.narrow(dim, 0, garbage)
+
     return out
+
+
+def get_git_revision_short_hash() -> str:
+    return subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()

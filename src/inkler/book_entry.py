@@ -1,6 +1,5 @@
 import glob
-import logging
-from typing import List, Dict
+from typing import List
 from pathlib import Path
 from dataclasses import dataclass
 import json
@@ -31,8 +30,9 @@ class BookBatch:
     def __init__(
             self,
             book_entry_l: List[BookEntry],
-            scale: float = 0.01,
-            dtype: torch.dtype = torch.float32
+            scale: float = 1.,
+            dtype: torch.dtype = torch.float32,
+            thresh: float | None = None
     ):
         self.titles = []
         self.authors = []
@@ -45,6 +45,10 @@ class BookBatch:
         max_sentence = max(len(t.text) for t in book_entry_l)
         max_hierarchy = None
         for it, t in enumerate(book_entry_l):
+            passed = True
+            hid_array = np.array(t.hierarchy_ids)
+            hid_array -= np.min(hid_array, axis=0, keepdims=True)
+            t.hierarchy_ids = hid_array.tolist()
             for hid in np.array(t.hierarchy_ids).T:
                 if np.max(hid) + 1 > len(np.unique(hid)):
                     raise ValueError(f"There are hierarchy gaps for {t.title} by {t.author}")
@@ -57,7 +61,11 @@ class BookBatch:
             mask[len(t.text):] = True
             self.masks.append(mask)
             self.scores.append(t.score)
-            self.genres.append(one_hot(torch.tensor(t.genre), num_classes=N_GENRES).sum(dim=0).clip(min=0))
+            self.genres.append(
+                one_hot(torch.tensor(t.genre, dtype=torch.long), num_classes=N_GENRES).sum(dim=0).clip(min=0)
+                if t.genre is not None and len(t.genre) > 0 else
+                torch.zeros(N_GENRES, dtype=torch.long)
+            )
             if max_hierarchy is None:
                 max_hierarchy = np.zeros(len(t.hierarchy_ids[0]))
             hierarchy  = -np.ones((max_sentence, len(max_hierarchy)))
@@ -68,8 +76,10 @@ class BookBatch:
             max_hierarchy = max_hierarchy + np.max(t.hierarchy_ids, axis=0) + 1
             self.postits.append(t.postit if t.postit is not None else -np.inf * np.ones(len(t.text[0])))
 
-        self.genres = torch.tensor(np.vstack(self.genres)).to(dtype)
         self.scores = torch.tensor(np.array(self.scores)).to(dtype) * scale
+        if thresh is not None:
+            self.scores = (self.scores > thresh).float()
+        self.genres = torch.vstack(self.genres).to(dtype)
         self.texts = torch.tensor(np.stack(self.texts)).to(dtype)
         self.hierarchy = torch.tensor(np.stack(self.hierarchy)).to(dtype)
         self.postits = torch.tensor(np.vstack(self.postits)).unsqueeze(1).to(dtype)
@@ -90,7 +100,10 @@ class BookBatch:
 
 def _load(path: str | Path):
     with open(path, "r") as f:
-        return json.load(f)
+        try:
+            return json.load(f)
+        except:
+            raise ValueError(f"Can't load book data {path}, possibly corrupted.")
 
 
 class BookDataset:
@@ -101,6 +114,8 @@ class BookDataset:
             seq_len: int = 512,
             batch_size: int = 32,
             preload_size: int = 64,
+            score_scale: float = 1.,
+            score_thresh: float | None = None,
             in_order: bool = False,
             n_cpu: int | None = None,
             device: int | str | torch.device = "cpu"
@@ -129,6 +144,8 @@ class BookDataset:
         if seq_len < 1:
             raise ValueError("seq_len must be positive")
         self.seq_len = seq_len
+        self.score_scale = score_scale
+        self.score_thresh = score_thresh
         self.doc_token = torch.finfo(torch.float16).min * torch.ones(in_dim)
 
         self.in_order = in_order
@@ -136,6 +153,7 @@ class BookDataset:
             self.idx = np.arange(len(self.book_entry_path_l))
         else:
             self.idx = np.random.permutation(len(self.book_entry_path_l))
+        self.n_books = len(self.book_entry_path_l)
         self.pending_book_entries = []
         self.pool = ThreadPool(processes=self.n_cpu)
         self.epoch = 0
@@ -159,7 +177,7 @@ class BookDataset:
             self.current_idx += 1
 
     def __len__(self):
-        return len(self.book_entry_path_l)
+        return len(self.book_entry_path_l) // self.batch_size
 
     def __enter__(self):
         return self
@@ -185,10 +203,9 @@ class BookDataset:
                         del self.pending_book_entries[i_be]
                         if len(results) >= self.batch_size:
                             break
-                time.sleep(0.01)
-
+                time.sleep(0.0001)
         self.preload_book_entries()
-        return BookBatch(results).get_dict()
+        return BookBatch(results, scale=self.score_scale, thresh=self.score_thresh).get_dict()
 
     def __getitem__(self, idx):
         if isinstance(idx, int):

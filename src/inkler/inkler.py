@@ -1,3 +1,4 @@
+import logging
 from typing import Callable, Tuple, Dict
 
 import torch
@@ -7,6 +8,8 @@ import pytorch_lightning as pl
 
 from inkler import sdp
 from inkler.constants import N_GENRES
+
+logger = logging.getLogger(__name__)
 
 
 class InklerOut(torch.nn.Module):
@@ -70,6 +73,7 @@ class Inkler(pl.LightningModule):
             score_act_fn: str = "relu",
             genre_act_fn: str = "relu",
             pooler_type: str = "amax",
+            score_error: str = "huber",
             n_genre: int = N_GENRES,
             dropout: float = 0.1,
             norm_eps: float = 1e-6,
@@ -77,9 +81,9 @@ class Inkler(pl.LightningModule):
             score_weight: float = 1.,
             genre_weight: float = 1.,
             betas: Tuple[float, float] = (.9, 0.999),
-            huber_beta: float = .01,
             optim_params: Dict = {},
-            scheduler_params: Dict = {},
+            scheduler_params: Dict | None = None,
+            warmup_params: Dict | None = None,
             **kwargs
     ):
         super(Inkler, self).__init__()
@@ -127,31 +131,63 @@ class Inkler(pl.LightningModule):
         self.optim_dict = optim_params
         self.betas = betas
         self.scheduler_dict = scheduler_params
+        self.warmup_dict = warmup_params
         self.score_w = score_weight
         self.genre_w = genre_weight
         self.postit_w = postit_weight
         self.class_loss = torch.nn.BCELoss(reduction="mean")
-        self.huber_loss = torch.nn.SmoothL1Loss(beta=huber_beta)
+        if score_error.lower() == "mse":
+            self.score_loss = torch.nn.MSELoss(reduction="mean")
+            logger.info("Set MSE loss for as score loss")
+        elif score_error.lower() == "bce":
+            self.score_loss = torch.nn.BCELoss(reduction="mean")
+            logger.info("Set BCE loss for as score loss")
+        else:
+            raise ValueError("score_error type not understood. Must be either 'mse' or 'bce'")
         self.mse = torch.nn.MSELoss()
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
+        logger.info(f"Use RAdam optimizer with lr {self.lr} and betas {self.betas}")
         optimizer = torch.optim.RAdam(
             self.parameters(),
             lr=self.lr,
             betas=self.betas,
             **self.optim_dict,
         )
-        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        #     optimizer=optimizer,
-        #     **self.scheduler_dict
-        # )
-        return {
-            "optimizer": optimizer,
-            # "lr_scheduler": {
-            #     "scheduler": scheduler,
-            #     "interval": "step",
-            # }
-        }
+        if self.warmup_dict is not None:
+            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer=optimizer,
+                **self.warmup_dict
+            )
+            logger.info("Warmup scheduler configured")
+        else:
+            warmup_scheduler = None
+        if self.scheduler_dict is not None:
+            cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer=optimizer,
+                **self.scheduler_dict
+            )
+            logger.info("Cosine scheduler configured")
+        else:
+            cosine_scheduler = None
+        if warmup_scheduler is not None and cosine_scheduler is not None:
+            scheduler = torch.optim.lr_scheduler.SequentialLR(
+                optimizer=optimizer,
+                schedulers=[warmup_scheduler, cosine_scheduler],
+                milestones=[self.warmup_dict["total_iters"]],
+            )
+        elif cosine_scheduler is not None:
+            scheduler = cosine_scheduler
+        else:
+            scheduler = None
+        optim_dict = {"optimizer": optimizer}
+        if scheduler is not None:
+            optim_dict["lr_scheduler"] = {
+                "scheduler": scheduler,
+                "interval": "step",
+            }
+
+        return optim_dict
 
     def forward(
             self,
@@ -184,7 +220,7 @@ class Inkler(pl.LightningModule):
             true_genre: torch.Tensor,
             postits: torch.Tensor | None = None,
     ) -> Dict[str, torch.Tensor]:
-        score_e = self.huber_loss(fwd_out["score"], true_score.reshape(fwd_out["score"].shape))
+        score_e = self.score_loss(fwd_out["score"], true_score.reshape(fwd_out["score"].shape))
         genre_e = self.class_loss(fwd_out["genre"], true_genre)
         postit_e = torch.tensor(0.)
         if postits is not None:

@@ -13,18 +13,27 @@ logger = logging.getLogger(__name__)
 
 
 class InklerOut(torch.nn.Module):
-    def __init__(self, d_model: int = int(2**9), act_fn: str | Callable | None = None, norm_eps: float = 1e-6):
+    def __init__(
+            self,
+            d_model: int = int(2**9),
+            act_fn: str | Callable | None = "relu",
+            norm_eps: float = 1e-6
+    ):
         super(InklerOut, self).__init__()
         self.d_model = d_model
         self.flatten = torch.nn.Flatten()
         self.norm = torch.nn.LayerNorm(d_model, eps=norm_eps)
         self.dense = torch.nn.Linear(self.d_model, self.d_model)
+        self.act_fn = self._convert_activation(act_fn)
+
+    @staticmethod
+    def _convert_activation(act_fn: str | Callable | None = None) -> Callable:
         if act_fn is None:
-            self.act_fn = lambda _: _
+            return lambda _: _
         elif isinstance(act_fn, str):
-            self.act_fn = ACT2FN[act_fn]
+            return ACT2FN[act_fn]
         else:
-            self.act_fn = act_fn
+            return act_fn
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.flatten(x)
@@ -33,13 +42,20 @@ class InklerOut(torch.nn.Module):
 
 
 class InklerScore(InklerOut):
-    def __init__(self, d_model: int = int(2**9), act_fn: str | Callable | None = torch.sigmoid, norm_eps: float = 1e-6):
+    def __init__(
+            self,
+            d_model: int = int(2**9),
+            act_fn: str | Callable | None = "relu",
+            score_fn: str | Callable | None = "linear",
+            norm_eps: float = 1e-6
+    ):
         super(InklerScore, self).__init__(d_model=d_model, act_fn=act_fn, norm_eps=norm_eps)
         self.out = torch.nn.Linear(d_model, 1)
+        self.score_fn = self._convert_activation(score_fn)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = super(InklerScore, self).forward(x)
-        return self.out(x)
+        return self.score_fn(self.out(x))
 
 
 class InklerGenre(InklerOut):
@@ -47,15 +63,17 @@ class InklerGenre(InklerOut):
             self,
             n_genre: int = N_GENRES,
             d_model: int = int(2**9),
-            act_fn: str | Callable | None = torch.sigmoid,
+            act_fn: str | Callable | None = "relu",
+            genre_fn: str | Callable | None = "sigmoid",
             norm_eps: float = 1e-6
     ):
         super(InklerGenre, self).__init__(d_model=d_model, act_fn=act_fn, norm_eps=norm_eps)
         self.out = torch.nn.Linear(d_model, n_genre)
+        self.genre_fn = self._convert_activation(genre_fn)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = super(InklerGenre, self).forward(x)
-        return torch.sigmoid(self.out(x))
+        return self.genre_fn(self.out(x))
 
 
 class Inkler(pl.LightningModule):
@@ -70,10 +88,11 @@ class Inkler(pl.LightningModule):
             n_hierarchy: int = 3,
             doc_token_fill: float = -1e7,
             lr: float = 1e-4,
-            score_act_fn: str = "relu",
-            genre_act_fn: str = "relu",
+            out_act_fn: str = "relu",
+            score_act_fn: str = "linear",
+            genre_act_fn: str = "sigmoid",
             pooler_type: str = "amax",
-            score_error: str = "huber",
+            score_error: str = "mse",
             n_genre: int = N_GENRES,
             dropout: float = 0.1,
             norm_eps: float = 1e-6,
@@ -117,13 +136,15 @@ class Inkler(pl.LightningModule):
 
         self.inkler_score = InklerScore(
             d_model=d_model,
-            act_fn=score_act_fn,
+            score_fn=score_act_fn,
+            act_fn=out_act_fn,
             norm_eps=norm_eps
         )
         self.inkler_genre = InklerGenre(
             n_genre=n_genre,
+            genre_fn=genre_act_fn,
             d_model=d_model,
-            act_fn=genre_act_fn,
+            act_fn=out_act_fn,
             norm_eps=norm_eps
         )
 

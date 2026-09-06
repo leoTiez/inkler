@@ -17,6 +17,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 
 from inkler.inkler import Inkler
 from inkler.book_entry import BookDataset
+from inkler.utils import get_git_revision_short_hash
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,40 @@ def main(args):
     if seed is not None:
         seed_everything(seed, workers=True)
 
+    # setup logging dir
+    log_dir = train_dict["train"].get("logging_dir", None)
+    name = train_dict["name"]
+    if log_dir is not None:
+        # setup log dir
+        log_dir = os.path.join(log_dir, f"{name}_{datetime.today().strftime('%y%m%d')}")
+        if os.path.isdir(log_dir):
+            log_dir += f"_{len(glob.glob(f"{log_dir}*")) + 1}"
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
+        # copy setup yaml file
+        shutil.copyfile(train_path, f"{log_dir}/{Path(train_path).name}")
+
+        # add file logger
+        file_log = logging.FileHandler(f"{log_dir}/train.log", mode="w")
+        file_log.setLevel(logging.DEBUG)
+        file_log.setFormatter(
+            logging.Formatter("%(asctime)s %(name)-12s %(levelname)-8s %(message)s")
+        )
+        main_log = logging.getLogger()
+        main_log.addHandler(file_log)
+
+        logger.info(f"Created logging directory at {log_dir}")
+
+    sha = get_git_revision_short_hash()
+    logger.info(f"Current git hash: {sha}")
+
+    if "logging_dir" in train_dict["train"]:
+        del train_dict["train"]["logging_dir"]
+    if isinstance(log_dir, str):
+        log_dir = os.path.join(log_dir, name)
+        checkpoint_dir = os.path.join(log_dir, "checkpoints")
+    else:
+        checkpoint_dir = "lightning_logs/checkpoints"
+
     logger.info("Loading book dataset...")
     dataloader = BookDataset(
         seq_len=int(train_dict["model"]["seq_len"]),
@@ -81,30 +116,14 @@ def main(args):
         lr=train_dict["train"]["lr"],
         optim_params=train_dict["train"].get("optim_params", None),
         scheduler_params=train_dict["train"].get("scheduler_params", None),
+        warmup_params=train_dict["train"].get("warmup_params", None),
         **train_dict["model"]
     )
 
-    for param in ["lr", "optim_params", "scheduler_params"]:
+    for param in ["lr", "optim_params", "scheduler_params", "warmup_params"]:
         if param in train_dict["train"]:
             del train_dict["train"][param]
 
-    log_dir = train_dict["train"].get("logging_dir", None)
-    name = train_dict["name"]
-    if log_dir is not None:
-        log_dir = os.path.join(log_dir, f"{name}_{datetime.today().strftime('%y%m%d')}")
-        if os.path.isdir(log_dir):
-            log_dir += f"_{len(glob.glob(f"{log_dir}*")) + 1}"
-        Path(log_dir).mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(train_path, f"{log_dir}/{Path(train_path).name}")
-        logger.info(f"Created logging directory at {log_dir}")
-
-    if "logging_dir" in train_dict["train"]:
-        del train_dict["train"]["logging_dir"]
-    if isinstance(log_dir, str):
-        log_dir = os.path.join(log_dir, name)
-        checkpoint_dir = os.path.join(log_dir, "checkpoints")
-    else:
-        checkpoint_dir = "lightning_logs/checkpoints"
     # saves top-K checkpoints based on "val_loss" metric
     checkpoint_callback = ModelCheckpoint(
         **train_dict["train"]["checkpoint"] if "checkpoint" in train_dict["train"] else {},

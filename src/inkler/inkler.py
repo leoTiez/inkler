@@ -76,6 +76,58 @@ class InklerGenre(InklerOut):
         return self.genre_fn(self.out(x))
 
 
+class InklerGlyph(torch.nn.Module):
+    def __init__(self, d_model=384, n_strokes=16):
+        super().__init__()
+        self.n_strokes = n_strokes
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(d_model, 128),
+            torch.nn.GELU(),
+            torch.nn.Linear(128, 256),
+            torch.nn.GELU(),
+            torch.nn.Linear(256, n_strokes * 7)
+        )
+
+    def forward(self, z):
+        theta = self.net(z).view(-1, self.n_strokes, 7)
+        # Position in [0,1]
+        xy = torch.sigmoid(theta[..., 0:2])
+        # Length
+        length = torch.sigmoid(theta[..., 2:3])
+        # Angle
+        angle = torch.tanh(theta[..., 3:4]) * torch.pi
+        # Width
+        width = torch.sigmoid(theta[..., 4:5])
+        # Curvature
+        curvature = torch.tanh(theta[..., 5:6])
+        # Stroke activation
+        activation = torch.sigmoid(theta[..., 6:7])
+
+        return torch.cat([
+            xy,
+            length,
+            angle,
+            width,
+            curvature,
+            activation
+        ], dim=-1)
+
+
+class GlyphDecoder(torch.nn.Module):
+    def __init__(self, n_strokes=16, d_model=384):
+        super().__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(n_strokes * 7, 256),
+            torch.nn.GELU(),
+            torch.nn.Linear(256, 256),
+            torch.nn.GELU(),
+            torch.nn.Linear(256, d_model)
+        )
+
+    def forward(self, theta):
+        return self.net(theta.flatten(1))
+
+
 class Inkler(pl.LightningModule):
     def __init__(
             self,
@@ -96,9 +148,11 @@ class Inkler(pl.LightningModule):
             n_genre: int = N_GENRES,
             dropout: float = 0.1,
             norm_eps: float = 1e-6,
+            n_strokes: int = 32,
+            recon_weight: float = 1.,
             postit_weight: float = 1.,
-            score_weight: float = 1.,
-            genre_weight: float = 1.,
+            genre_weight: float = .1,
+            sparsity_weight: float = 0.05,
             betas: Tuple[float, float] = (.9, 0.999),
             optim_params: Dict = {},
             scheduler_params: Dict | None = None,
@@ -134,12 +188,15 @@ class Inkler(pl.LightningModule):
             pooler_type=pooler_type,
         )
 
-        self.inkler_score = InklerScore(
-            d_model=d_model,
-            score_fn=score_act_fn,
-            act_fn=out_act_fn,
-            norm_eps=norm_eps
-        )
+        self.inkler_glyph = InklerGlyph(d_model=d_model, n_strokes=n_strokes)
+        self.glyph_decoder = GlyphDecoder(d_model=d_model, n_strokes=n_strokes)
+        self.log_sig2 = torch.nn.Linear(d_model, d_model)
+        # self.inkler_score = InklerScore(
+        #     d_model=d_model,
+        #     score_fn=score_act_fn,
+        #     act_fn=out_act_fn,
+        #     norm_eps=norm_eps
+        # )
         self.inkler_genre = InklerGenre(
             n_genre=n_genre,
             genre_fn=genre_act_fn,
@@ -153,19 +210,21 @@ class Inkler(pl.LightningModule):
         self.betas = betas
         self.scheduler_dict = scheduler_params
         self.warmup_dict = warmup_params
-        self.score_w = score_weight
+        self.recon_w = recon_weight
+        self.sparsity_w = sparsity_weight
         self.genre_w = genre_weight
         self.postit_w = postit_weight
         self.class_loss = torch.nn.BCELoss(reduction="mean")
-        if score_error.lower() == "mse":
-            self.score_loss = torch.nn.MSELoss(reduction="mean")
-            logger.info("Set MSE loss for as score loss")
-        elif score_error.lower() == "bce":
-            self.score_loss = torch.nn.BCELoss(reduction="mean")
-            logger.info("Set BCE loss for as score loss")
-        else:
-            raise ValueError("score_error type not understood. Must be either 'mse' or 'bce'")
-        self.mse = torch.nn.MSELoss()
+        self.recon_loss = torch.nn.MSELoss(reduction="mean")
+
+        # if recon_error.lower() == "mse":
+        #     self.score_loss = torch.nn.MSELoss(reduction="mean")
+        #     logger.info("Set MSE loss for as score loss")
+        # elif score_error.lower() == "bce":
+        #     self.score_loss = torch.nn.BCELoss(reduction="mean")
+        #     logger.info("Set BCE loss for as score loss")
+        # else:
+        #     raise ValueError("score_error type not understood. Must be either 'mse' or 'bce'")
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
         logger.info(f"Use RAdam optimizer with lr {self.lr} and betas {self.betas}")
@@ -216,20 +275,35 @@ class Inkler(pl.LightningModule):
             hierarchy: torch.Tensor,
             attention_mask: torch.Tensor,
     ) -> Dict:
-        document_x = self.inkler_embedder(
+        document_x, level_dict = self.inkler_embedder(
             x=x_sentence,
             hierarchy_x=self.doc_token.tile(dims=(x_sentence.shape[0], 1, 1)),
             hierarchy=hierarchy,
             attention_mask=attention_mask,
         )
 
-        score = self.inkler_score(document_x)
+        inkler_glyph = {}
+        glyph_decoder = {}
+        log_sig2 = {}
+        for level, embedding in level_dict.items():
+            log_sig2[f"log_sig2_{level}"] = self.log_sig2(embedding)
+            inkler_glyph[f"glyph_{level}"] = self.inkler_glyph(
+                embedding # TODO + (.5 * log_sig2[f"log_sig2_{level}"]).exp() * torch.randn_like(embedding)
+            )
+            glyph_decoder[f"recon_{level}"] = self.glyph_decoder(inkler_glyph[f"glyph_{level}"])
+
+        # score = self.inkler_score(document_x)
         genre = self.inkler_genre(document_x)
 
+        level_dict = {f"document_{level}": v for level, v in level_dict.items()}
         out_dict =  {
-            "score": score,
-            "genre": genre,
             "document_x": document_x,
+            "genre": genre,
+            "n_levels": len(level_dict),
+            **level_dict,
+            **inkler_glyph,
+            **glyph_decoder,
+            **log_sig2
         }
 
         return out_dict
@@ -237,12 +311,22 @@ class Inkler(pl.LightningModule):
     def loss(
             self,
             fwd_out: Dict,
-            true_score: float | torch.Tensor,
             true_genre: torch.Tensor,
             postits: torch.Tensor | None = None,
+            **kwargs,
     ) -> Dict[str, torch.Tensor]:
-        score_e = self.score_loss(fwd_out["score"], true_score.reshape(fwd_out["score"].shape))
         genre_e = self.class_loss(fwd_out["genre"], true_genre)
+        recon_e = torch.tensor(0., device=fwd_out["genre"].device)
+        sparsity_e = torch.tensor(0., device=fwd_out["genre"].device)
+        for level in range(-1, fwd_out["n_levels"] - 1):
+            recon_e = recon_e + self.recon_loss(
+                fwd_out[f"recon_{level}"].reshape(-1, self.d_model), fwd_out[f"document_{level}"].reshape(-1, self.d_model)
+            )
+            sparsity_e = sparsity_e + fwd_out[f"glyph_{level}"][..., -1].mean()
+            sparsity_e = sparsity_e.mean()
+
+        recon_e = recon_e / float(fwd_out["n_levels"])
+        sparsity_e = sparsity_e / float(fwd_out["n_levels"])
         postit_e = torch.tensor(0.)
         if postits is not None:
             # Equivalent to `self.mse(postits[not_inf_mask], document_x[not_inf_mask])`
@@ -258,10 +342,16 @@ class Inkler(pl.LightningModule):
             count = not_inf_mask.sum().clamp(min=1).to(sq_err.dtype)
             postit_e = sq_err.sum() / count
         return {
-            "score_loss": score_e,
             "genre_loss": genre_e,
             "postit_loss": postit_e,
-            "total_loss": self.score_w * score_e + self.genre_w * genre_e + self.postit_w * postit_e
+            "recon_loss": recon_e,
+            "sparsity_loss": sparsity_e,
+            "total_loss": (
+                    self.genre_w * genre_e
+                    + self.postit_w * postit_e
+                    + self.recon_w * recon_e
+                    + self.sparsity_w * sparsity_e
+            )
         }
 
     def training_step(

@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Tuple
+from typing import Tuple, Dict
 import torch
 
 from inkler.modules import XCA, AttentionWrapper, Pooler
@@ -151,8 +151,11 @@ class SDPBlock(torch.nn.Module):
             hierarchy: torch.Tensor,
             attention_mask: torch.Tensor | None = None,
             mask_hierarchy: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> Tuple[torch.Tensor | None, torch.Tensor, Dict[int, torch.Tensor]]:
         sentence_embedding = None
+        out_embedding = {
+            -1: x[:, 1:, :].clone(),
+        }
         if attention_mask.is_floating_point():
             attention_mask = attention_mask.to(torch.bool)
         # two attention masks, one that remains in passed dimensionality
@@ -176,6 +179,7 @@ class SDPBlock(torch.nn.Module):
                 mask=attention_mask_,
                 token_size=hierarchy_x.shape[1]
             )
+            out_embedding[i_d] = x[:, 1:, :].clone() if i_d < len(self.st_layers) - 1 and x.shape[1] > 1 else x.clone()
             # adapt hierarchy ids to new layout
             if i_d < len(self.st_layers) - 1:
                 # compute offset and collation as for the pooling but mus be performed over unchanged attention masl
@@ -197,7 +201,7 @@ class SDPBlock(torch.nn.Module):
                 ).reshape(x.shape[:2])
 
         # return sentence embedding and class token
-        return sentence_embedding, x
+        return sentence_embedding, x, out_embedding
 
 
 class StructuralDocumentProcessor(torch.nn.Module):
@@ -262,9 +266,10 @@ class StructuralDocumentProcessor(torch.nn.Module):
         pe = self.pe[:seq_len].unsqueeze(0)
         # add lowest hierarchy to position
         x = x + pe + hierarchy[:, :, -1].unsqueeze(-1)
+        level_dict = None
         for i_block, sdp_block in enumerate(self.sdp_blocks):
             # x is new sentence embedding, hierarchy_x is new class token
-            x, hierarchy_x = sdp_block(x, hierarchy_x, hierarchy, attention_mask, mask_hierarchy=i_block == 0)
+            x, hierarchy_x, level_dict = sdp_block(x, hierarchy_x, hierarchy, attention_mask, mask_hierarchy=i_block == 0)
 
-        return hierarchy_x
+        return hierarchy_x, level_dict
 

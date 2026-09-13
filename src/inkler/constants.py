@@ -66,3 +66,6 @@ ROMAN_MAP = {
     "D": 500,
     "M": 1000
 }
+
+MIN_LEN_PARAGRAPH = 120
+MIN_LEN_SENTENCE = 15

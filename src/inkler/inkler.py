@@ -1,13 +1,17 @@
 import logging
 from typing import Callable, Tuple, Dict
+from pathlib import Path
+import os
 
 import torch
 from pytorch_lightning.utilities.types import OptimizerLRScheduler
 from transformers.activations import ACT2FN
 import pytorch_lightning as pl
+from matplotlib import pyplot as plt
 
 from inkler import sdp
 from inkler.constants import N_GENRES
+from inkler.renderer import DifferentiableGlyphRenderer
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +161,7 @@ class Inkler(pl.LightningModule):
             optim_params: Dict = {},
             scheduler_params: Dict | None = None,
             warmup_params: Dict | None = None,
+            render_params: Dict | None = None,
             **kwargs
     ):
         super(Inkler, self).__init__()
@@ -214,6 +219,10 @@ class Inkler(pl.LightningModule):
             norm_eps=norm_eps
         )
 
+        if render_params is None:
+            render_params = {}
+        self.renderer = DifferentiableGlyphRenderer(**render_params)
+
         self.lr = lr
         self.optim_dict = optim_params
         self.betas = betas
@@ -227,6 +236,8 @@ class Inkler(pl.LightningModule):
         self.class_loss = torch.nn.BCELoss(reduction="mean")
         self.recon_loss = torch.nn.MSELoss(reduction="mean")
         self.dec_loss = torch.nn.MSELoss(reduction="mean")
+        self.glyph_log_dir = None
+        self.val_step = -1
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
         logger.info(f"Use RAdam optimizer with lr {self.lr} and betas {self.betas}")
@@ -412,7 +423,28 @@ class Inkler(pl.LightningModule):
         for loss_name, loss_val in loss.items():
             self.log(name=f"val_{loss_name}", value=loss_val, on_step=False, on_epoch=True, prog_bar=True)
 
+        if self.glyph_log_dir is None:
+            self.glyph_log_dir = os.path.join("/".join(self.logger.log_dir.split("/")[:-2]), "val_glyphs")
+            Path(self.glyph_log_dir).mkdir(parents=True, exist_ok=True)
+
+        val_glyphs = {key: val for key, val in result_dict.items() if "glyph"
+                      in key and int(key.split("_")[-1]) == self.n_hierarchy - 1}
+        for glyph_level, glyph in val_glyphs.items():
+            rendered_glyph = self.renderer(glyph)
+            for i_glyph, rg in enumerate(rendered_glyph):
+                save_name = f"{"_".join(batch["titles"][i_glyph].split(" "))}_BY_{
+                    "_".join(batch["authors"][i_glyph].split(" "))}_epoch_{self.current_epoch}.png"
+                fig, ax = plt.subplots(1, 1, figsize=(2, 2))
+                ax.imshow(rg.detach().cpu().numpy(), aspect="auto", cmap="gray_r")
+                ax.axis("off")
+                fig.tight_layout()
+                fig.savefig(f"{self.glyph_log_dir}/{save_name}")
+                plt.close(fig)
         return loss["total_loss"]
+
+    @torch.no_grad()
+    def on_validation_epoch_end(self):
+        self.val_step += 1
 
     @torch.no_grad()
     def test_step(self, batch: Dict):

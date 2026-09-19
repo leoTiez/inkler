@@ -1,7 +1,7 @@
 from typing import Tuple
 import torch
 
-from inkler.utils import index_reduce_mps, canonical_mask
+from inkler.utils import index_reduce_mps, canonical_mask, broadcast_index
 
 
 class LPI(torch.nn.Module):
@@ -44,11 +44,10 @@ class Pooler(torch.nn.Module):
             x: torch.Tensor,
             document_id: torch.Tensor,
             mask: torch.Tensor | None = None,
-            token_size: int = 1
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Pool results over indices"""
         # do not include cls token for pooling
-        x_ = x[:, token_size:]  # remove hierarchy
+        x_ = x # [:, token_size:]  # remove hierarchy
         batch_size, seq_len, x_dim = x_.shape
         if mask is None:
             mask = torch.zeros(x_.shape[:-1], device=x_.device, dtype=torch.bool)
@@ -76,7 +75,7 @@ class Pooler(torch.nn.Module):
 
         # collate data values over indices that are aggregated over hierarchical document ids + offset,
         # index_reduce_mps is an mps-friendly implementation of the index_reduce tensor function
-        t_ = index_reduce_mps(
+        t_, out_idx = index_reduce_mps(
             input=t_,
             dim=0,
             index=(document_id + add_idx).flatten(),
@@ -87,7 +86,72 @@ class Pooler(torch.nn.Module):
         )
         # reshape
         t_ = t_.reshape(batch_size, out_size, x_dim)
-        return t_, new_mask
+
+        if out_idx is not None:
+            # Convert flattened [batch, position] back to per-example position.
+            valid_indices = out_idx < seq_len * batch_size
+            out_idx = torch.where(valid_indices, out_idx % seq_len, torch.full_like(out_idx, -1))
+            out_idx = out_idx.reshape(batch_size, -1, x_dim)
+
+        return t_, new_mask, out_idx
+
+
+class Unpooler(torch.nn.Module):
+    def __init__(
+            self,
+            d_model: int,
+            init_shift: float = -10.
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.token = torch.nn.Parameter(torch.randn((1, self.d_model)) + init_shift)
+
+    def forward(
+            self,
+            pooled: torch.Tensor,
+            seq_len: int,
+            max_indices: torch.Tensor | None = None,
+            mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        batch_size, out_size, x_dim = pooled.shape
+
+        if max_indices is None:
+            max_indices = torch.arange(seq_len, device=pooled.device).unsqueeze(0).expand(pooled.shape)
+
+        if max_indices.shape != pooled.shape:
+            raise ValueError(
+                f"max_indices must have shape {pooled.shape}, "
+                f"got {max_indices.shape}"
+            )
+
+        max_indices = max_indices.to(torch.int64)
+
+        # source positions into flattened output positions.
+        batch_offset = torch.arange(batch_size, device=pooled.device).reshape(batch_size, 1, 1) * seq_len
+        flat_target = max_indices + batch_offset
+        valid = max_indices >= 0 & ~mask.unsqueeze(-1)
+
+        # Add one garbage row so masked/invalid entries don't need boolean indexing
+        # (important for MPS-oriented implementation).
+        garbage = batch_size * seq_len
+        flat_target = torch.where(
+            valid,
+            flat_target,
+            torch.full_like(flat_target, garbage),
+        )
+
+        # important for amax cos only scattered to original position
+        out_flat = torch.ones((batch_size * seq_len, x_dim), device=pooled.device, dtype=pooled.dtype,) * self.token
+        # scatter to original position, if amax only one position
+        out_flat = torch.scatter(
+            out_flat,
+            dim=0,
+            index=flat_target.reshape(-1, x_dim),
+            src=pooled.reshape(-1, x_dim),
+        )
+
+        # remove garbage
+        return out_flat[: batch_size * seq_len].reshape(batch_size, seq_len, x_dim)
 
 
 class XCA(torch.nn.Module):

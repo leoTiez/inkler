@@ -135,22 +135,22 @@ class Inkler(pl.LightningModule):
             seq_len: int = int(2**15),
             n_heads: int = 16,
             d_ff: int = int(2**10),
-            n_blocks: int = 8,
+            n_enc_blocks: int = 8,
+            n_dec_blocks: int = 1,
             n_xca: int = 2,
             n_hierarchy: int = 3,
             doc_token_fill: float = -1e7,
             lr: float = 1e-4,
             out_act_fn: str = "relu",
-            score_act_fn: str = "linear",
             genre_act_fn: str = "sigmoid",
             pooler_type: str = "amax",
-            score_error: str = "mse",
             n_genre: int = N_GENRES,
             dropout: float = 0.1,
             norm_eps: float = 1e-6,
             n_strokes: int = 32,
             recon_weight: float = 1.,
             postit_weight: float = 1.,
+            decode_weight: float = 1.,
             genre_weight: float = .1,
             sparsity_weight: float = 0.05,
             betas: Tuple[float, float] = (.9, 0.999),
@@ -168,9 +168,13 @@ class Inkler(pl.LightningModule):
             raise ValueError("seq_len must be larger than 0")
         self.seq_len = seq_len
 
-        if n_blocks < 1:
-            raise ValueError("n_blocks must be larger than 0")
-        self.n_blocks = n_blocks
+        if n_enc_blocks < 1:
+            raise ValueError("n_enc_blocks must be larger than 0")
+        self.n_enc_blocks = n_enc_blocks
+
+        if n_dec_blocks < 1:
+            raise ValueError("n_dec_blocks must be larger than 0")
+        self.n_dec_blocks = n_dec_blocks
 
         if n_hierarchy < 1:
             raise ValueError("n_hierarchy must be larger than 0")
@@ -181,22 +185,27 @@ class Inkler(pl.LightningModule):
             n_heads=n_heads,
             seq_len=self.seq_len,
             d_ff=d_ff,
-            n_blocks=self.n_blocks,
+            n_blocks=self.n_enc_blocks,
             dropout=dropout,
             n_hierarchy=self.n_hierarchy,
             n_xca=n_xca,
             pooler_type=pooler_type,
         )
+        self.inkler_decoder = sdp.StructuralDocumentDecoder(
+            d_model=self.d_model,
+            n_heads=n_heads,
+            seq_len=self.seq_len,
+            d_ff=d_ff,
+            n_blocks=self.n_dec_blocks,
+            dropout=dropout,
+            n_hierarchy=self.n_hierarchy,
+            n_xca=n_xca,
+        )
 
         self.inkler_glyph = InklerGlyph(d_model=d_model, n_strokes=n_strokes)
         self.glyph_decoder = GlyphDecoder(d_model=d_model, n_strokes=n_strokes)
         self.log_sig2 = torch.nn.Linear(d_model, d_model)
-        # self.inkler_score = InklerScore(
-        #     d_model=d_model,
-        #     score_fn=score_act_fn,
-        #     act_fn=out_act_fn,
-        #     norm_eps=norm_eps
-        # )
+
         self.inkler_genre = InklerGenre(
             n_genre=n_genre,
             genre_fn=genre_act_fn,
@@ -214,17 +223,10 @@ class Inkler(pl.LightningModule):
         self.sparsity_w = sparsity_weight
         self.genre_w = genre_weight
         self.postit_w = postit_weight
+        self.decode_w = decode_weight
         self.class_loss = torch.nn.BCELoss(reduction="mean")
         self.recon_loss = torch.nn.MSELoss(reduction="mean")
-
-        # if recon_error.lower() == "mse":
-        #     self.score_loss = torch.nn.MSELoss(reduction="mean")
-        #     logger.info("Set MSE loss for as score loss")
-        # elif score_error.lower() == "bce":
-        #     self.score_loss = torch.nn.BCELoss(reduction="mean")
-        #     logger.info("Set BCE loss for as score loss")
-        # else:
-        #     raise ValueError("score_error type not understood. Must be either 'mse' or 'bce'")
+        self.dec_loss = torch.nn.MSELoss(reduction="mean")
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
         logger.info(f"Use RAdam optimizer with lr {self.lr} and betas {self.betas}")
@@ -275,11 +277,18 @@ class Inkler(pl.LightningModule):
             hierarchy: torch.Tensor,
             attention_mask: torch.Tensor,
     ) -> Dict:
-        document_x, level_dict = self.inkler_embedder(
+        document_x, level_dict, deplex_idx, deplex_mask = self.inkler_embedder(
             x=x_sentence,
             hierarchy_x=self.doc_token.tile(dims=(x_sentence.shape[0], 1, 1)),
             hierarchy=hierarchy,
             attention_mask=attention_mask,
+        )
+
+        decode_x = self.inkler_decoder(
+            x=level_dict,
+            deplex_idx=deplex_idx,
+            deplex_mask=deplex_mask,
+            hierarchy_x=document_x,
         )
 
         inkler_glyph = {}
@@ -295,12 +304,14 @@ class Inkler(pl.LightningModule):
         # score = self.inkler_score(document_x)
         genre = self.inkler_genre(document_x)
 
-        level_dict = {f"document_{level}": v for level, v in level_dict.items()}
+        level_dict = {f"enc_{level}": v for level, v in level_dict.items()}
+        decoder_dict = {f"dec_{level - 1}": v for level, v in enumerate(reversed(decode_x))}
         out_dict =  {
             "document_x": document_x,
             "genre": genre,
             "n_levels": len(level_dict),
             **level_dict,
+            **decoder_dict,
             **inkler_glyph,
             **glyph_decoder,
             **log_sig2
@@ -317,16 +328,22 @@ class Inkler(pl.LightningModule):
     ) -> Dict[str, torch.Tensor]:
         genre_e = self.class_loss(fwd_out["genre"], true_genre)
         recon_e = torch.tensor(0., device=fwd_out["genre"].device)
+        dec_e = torch.tensor(0., device=fwd_out["genre"].device)
         sparsity_e = torch.tensor(0., device=fwd_out["genre"].device)
-        for level in range(-1, fwd_out["n_levels"] - 1):
+        for level in range(-1, fwd_out["n_levels"] - 1):  # shifted by 1
             recon_e = recon_e + self.recon_loss(
-                fwd_out[f"recon_{level}"].reshape(-1, self.d_model), fwd_out[f"document_{level}"].reshape(-1, self.d_model)
+                fwd_out[f"recon_{level}"].reshape(-1, self.d_model), fwd_out[f"enc_{level}"].reshape(-1, self.d_model)
             )
+            if level < fwd_out["n_levels"] - 2:  # one less decoding
+                dec_e = dec_e + self.dec_loss(
+                    fwd_out[f"dec_{level}"].reshape(-1, self.d_model), fwd_out[f"enc_{level}"].reshape(-1, self.d_model)
+                )
             sparsity_e = sparsity_e + fwd_out[f"glyph_{level}"][..., -1].mean()
             sparsity_e = sparsity_e.mean()
 
         recon_e = recon_e / float(fwd_out["n_levels"])
         sparsity_e = sparsity_e / float(fwd_out["n_levels"])
+        dec_e = dec_e / float(fwd_out["n_levels"] - 1)
         postit_e = torch.tensor(0.)
         if postits is not None:
             # Equivalent to `self.mse(postits[not_inf_mask], document_x[not_inf_mask])`
@@ -346,11 +363,13 @@ class Inkler(pl.LightningModule):
             "postit_loss": postit_e,
             "recon_loss": recon_e,
             "sparsity_loss": sparsity_e,
+            "decoder_loss": dec_e,
             "total_loss": (
                     self.genre_w * genre_e
                     + self.postit_w * postit_e
                     + self.recon_w * recon_e
                     + self.sparsity_w * sparsity_e
+                    + self.decode_w * dec_e
             )
         }
 

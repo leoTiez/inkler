@@ -102,7 +102,7 @@ class InklerGlyph(torch.nn.Module):
         # Angle
         angle = torch.tanh(theta[..., 3:4]) * torch.pi
         # Width
-        width = torch.tanh(theta[..., 4:5]).relu()  # get only positive width
+        width = torch.tanh(theta[..., 4:5])
         # Curvature
         curvature = torch.tanh(theta[..., 5:6])
 
@@ -345,7 +345,10 @@ class Inkler(pl.LightningModule):
                 dec_e = dec_e + self.dec_loss(
                     fwd_out[f"dec_{level}"].reshape(-1, self.d_model), fwd_out[f"enc_{level}"].reshape(-1, self.d_model)
                 )
-            sparsity_e = sparsity_e + fwd_out[f"glyph_{level}"][..., 4].mean()
+            sparsity_e = sparsity_e + fwd_out[f"glyph_{level}"][..., 4].masked_fill(
+                fwd_out[f"glyph_{level}"][..., 4] <= 0.,
+                0.
+            ).mean()
             sparsity_e = sparsity_e.mean()
 
         recon_e = recon_e / float(fwd_out["n_levels"])

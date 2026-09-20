@@ -30,7 +30,7 @@ class DifferentiableGlyphRenderer(nn.Module):
             min_width=0.001,
             max_length=1.0,
             raster_temperature=0.002,
-            use_thresh: float | None = .5,
+            margin: float = .1
     ):
         super().__init__()
 
@@ -59,9 +59,8 @@ class DifferentiableGlyphRenderer(nn.Module):
             1.0,
             n_samples
         )
-
+        self.margin = margin
         self.register_buffer("t", t)
-        self.use_thresh = use_thresh
 
     def stroke_centerline(self, theta):
         """
@@ -254,9 +253,13 @@ class DifferentiableGlyphRenderer(nn.Module):
         # --------------------------------------------------
         # Construct centerlines
         # --------------------------------------------------
-
+        batch_size = theta.shape[0]
         points = self.stroke_centerline(theta)
 
+        # rescale to the same canvas size and add margin
+        minv = points.transpose(1, -1).flatten(2).min(-1, keepdim=True)[0].reshape(batch_size, 1, 1, -1)
+        maxv = points.transpose(1, -1).flatten(2).max(-1, keepdim=True)[0].reshape(batch_size, 1, 1, -1)
+        points = self.margin + (1. - 2 * self.margin) * (points - minv) / (maxv - minv)
         # --------------------------------------------------
         # Width
         #
@@ -264,23 +267,16 @@ class DifferentiableGlyphRenderer(nn.Module):
         # --------------------------------------------------
 
         width_parameter = theta[..., 4]
+        active = (width_parameter > 0).float()
 
         width = (
-            self.min_width
+            self.min_width * active
             + width_parameter
             * (
                 self.max_width
                 - self.min_width
             )
         )
-
-        # --------------------------------------------------
-        # Stroke activation
-        # --------------------------------------------------
-
-        activation = theta[..., 6]
-        if self.use_thresh is not None:
-            activation = (activation > self.use_thresh).to(activation.dtype)
 
         # --------------------------------------------------
         # Render every stroke
@@ -295,12 +291,6 @@ class DifferentiableGlyphRenderer(nn.Module):
             stroke = self.render_single_stroke(
                 points[:, k],
                 width[:, k:k+1],
-            )
-
-            # Activation controls opacity.
-            stroke = (
-                stroke
-                * activation[:, k:k+1, None]
             )
 
             stroke_images.append(stroke)

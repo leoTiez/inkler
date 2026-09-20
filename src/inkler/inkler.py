@@ -2,6 +2,7 @@ import logging
 from typing import Callable, Tuple, Dict
 from pathlib import Path
 import os
+import math
 
 import torch
 from pytorch_lightning.utilities.types import OptimizerLRScheduler
@@ -89,11 +90,11 @@ class InklerGlyph(torch.nn.Module):
             torch.nn.GELU(),
             torch.nn.Linear(128, 256),
             torch.nn.GELU(),
-            torch.nn.Linear(256, n_strokes * 7)
+            torch.nn.Linear(256, n_strokes * 6)
         )
 
     def forward(self, z):
-        theta = self.net(z).view(-1, self.n_strokes, 7)
+        theta = self.net(z).view(-1, self.n_strokes, 6)
         # Position in [0,1]
         xy = torch.sigmoid(theta[..., 0:2])
         # Length
@@ -101,19 +102,16 @@ class InklerGlyph(torch.nn.Module):
         # Angle
         angle = torch.tanh(theta[..., 3:4]) * torch.pi
         # Width
-        width = torch.sigmoid(theta[..., 4:5])
+        width = torch.tanh(theta[..., 4:5]).relu()  # get only positive width
         # Curvature
         curvature = torch.tanh(theta[..., 5:6])
-        # Stroke activation
-        activation = torch.sigmoid(theta[..., 6:7])
 
         return torch.cat([
             xy,
             length,
             angle,
             width,
-            curvature,
-            activation
+            curvature
         ], dim=-1)
 
 
@@ -121,7 +119,7 @@ class GlyphDecoder(torch.nn.Module):
     def __init__(self, n_strokes=16, d_model=384):
         super().__init__()
         self.net = torch.nn.Sequential(
-            torch.nn.Linear(n_strokes * 7, 256),
+            torch.nn.Linear(n_strokes * 6, 256),
             torch.nn.GELU(),
             torch.nn.Linear(256, 256),
             torch.nn.GELU(),
@@ -157,6 +155,7 @@ class Inkler(pl.LightningModule):
             decode_weight: float = 1.,
             genre_weight: float = .1,
             sparsity_weight: float = 0.05,
+            sig_weight: float = 0.1,
             betas: Tuple[float, float] = (.9, 0.999),
             optim_params: Dict = {},
             scheduler_params: Dict | None = None,
@@ -209,7 +208,6 @@ class Inkler(pl.LightningModule):
 
         self.inkler_glyph = InklerGlyph(d_model=d_model, n_strokes=n_strokes)
         self.glyph_decoder = GlyphDecoder(d_model=d_model, n_strokes=n_strokes)
-        self.log_sig2 = torch.nn.Linear(d_model, d_model)
 
         self.inkler_genre = InklerGenre(
             n_genre=n_genre,
@@ -233,6 +231,7 @@ class Inkler(pl.LightningModule):
         self.genre_w = genre_weight
         self.postit_w = postit_weight
         self.decode_w = decode_weight
+        self.sig = sig_weight
         self.class_loss = torch.nn.BCELoss(reduction="mean")
         self.recon_loss = torch.nn.MSELoss(reduction="mean")
         self.dec_loss = torch.nn.MSELoss(reduction="mean")
@@ -304,11 +303,9 @@ class Inkler(pl.LightningModule):
 
         inkler_glyph = {}
         glyph_decoder = {}
-        log_sig2 = {}
         for level, embedding in level_dict.items():
-            log_sig2[f"log_sig2_{level}"] = self.log_sig2(embedding)
             inkler_glyph[f"glyph_{level}"] = self.inkler_glyph(
-                embedding # TODO + (.5 * log_sig2[f"log_sig2_{level}"]).exp() * torch.randn_like(embedding)
+                embedding + self.sig * torch.randn_like(embedding)  # reparameterize
             )
             glyph_decoder[f"recon_{level}"] = self.glyph_decoder(inkler_glyph[f"glyph_{level}"])
 
@@ -325,7 +322,6 @@ class Inkler(pl.LightningModule):
             **decoder_dict,
             **inkler_glyph,
             **glyph_decoder,
-            **log_sig2
         }
 
         return out_dict
@@ -349,7 +345,7 @@ class Inkler(pl.LightningModule):
                 dec_e = dec_e + self.dec_loss(
                     fwd_out[f"dec_{level}"].reshape(-1, self.d_model), fwd_out[f"enc_{level}"].reshape(-1, self.d_model)
                 )
-            sparsity_e = sparsity_e + fwd_out[f"glyph_{level}"][..., -1].mean()
+            sparsity_e = sparsity_e + fwd_out[f"glyph_{level}"][..., 4].mean()
             sparsity_e = sparsity_e.mean()
 
         recon_e = recon_e / float(fwd_out["n_levels"])
@@ -433,9 +429,9 @@ class Inkler(pl.LightningModule):
             rendered_glyph = self.renderer(glyph)
             for i_glyph, rg in enumerate(rendered_glyph):
                 save_name = f"{"_".join(batch["titles"][i_glyph].split(" "))}_BY_{
-                    "_".join(batch["authors"][i_glyph].split(" "))}_epoch_{self.current_epoch}.png"
+                    "_".join(batch["authors"][i_glyph].split(" "))}_epoch_{self.val_step}.png"
                 fig, ax = plt.subplots(1, 1, figsize=(2, 2))
-                ax.imshow(rg.detach().cpu().numpy(), aspect="auto", cmap="gray_r")
+                ax.imshow(rg.detach().cpu().numpy(), aspect="auto", cmap="gray_r", interpolation="none")
                 ax.axis("off")
                 fig.tight_layout()
                 fig.savefig(f"{self.glyph_log_dir}/{save_name}")
@@ -443,7 +439,7 @@ class Inkler(pl.LightningModule):
         return loss["total_loss"]
 
     @torch.no_grad()
-    def on_validation_epoch_end(self):
+    def on_validation_epoch_start(self):
         self.val_step += 1
 
     @torch.no_grad()

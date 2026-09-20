@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from networkx.algorithms import threshold
 
 
 class DifferentiableGlyphRenderer(nn.Module):
@@ -30,7 +31,8 @@ class DifferentiableGlyphRenderer(nn.Module):
             min_width=0.001,
             max_length=1.0,
             raster_temperature=0.002,
-            margin: float = .1
+            margin: float = .1,
+            threshold: float| None = 0.5,
     ):
         super().__init__()
 
@@ -60,6 +62,7 @@ class DifferentiableGlyphRenderer(nn.Module):
             n_samples
         )
         self.margin = margin
+        self.threshold = threshold
         self.register_buffer("t", t)
 
     def stroke_centerline(self, theta):
@@ -235,7 +238,8 @@ class DifferentiableGlyphRenderer(nn.Module):
         alpha = torch.sigmoid(
             (radius2 - soft_d2) / softness
         )
-
+        if threshold is not None:
+            alpha = (alpha > 0.5).float()
         return alpha
 
     def forward(self, theta):
@@ -266,7 +270,7 @@ class DifferentiableGlyphRenderer(nn.Module):
         # theta[..., 4] is assumed to already be in [0,1].
         # --------------------------------------------------
 
-        width_parameter = theta[..., 4]
+        width_parameter = theta[..., 4].relu()
         active = (width_parameter > 0).float()
 
         width = (

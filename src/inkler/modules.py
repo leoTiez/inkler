@@ -1,7 +1,8 @@
 from typing import Tuple
 import torch
 
-from inkler.utils import index_reduce_mps, canonical_mask, broadcast_index
+from inkler.utils import index_reduce_mps, canonical_mask
+from inkler.constants import BUCKETS
 
 
 class LPI(torch.nn.Module):
@@ -60,6 +61,10 @@ class Pooler(torch.nn.Module):
         range_size = document_id.max(-1)[0] - min_val
         # create new output tensor that is as big as max range
         out_size = int(torch.max(range_size) + 1)  # plus one to convert from index to size
+        dist_buckets = torch.tensor(BUCKETS, dtype=torch.float32) - out_size
+        dist_buckets[dist_buckets < 0] = torch.inf
+        # get first bucket that is larger than the max text length
+        out_size = BUCKETS[torch.abs(dist_buckets).argmin()]
         t_ = -torch.ones((batch_size * out_size, x_dim), device=x_.device)
 
         # set mask such that values that don't reach out_size are masked out

@@ -1,7 +1,11 @@
 import subprocess
 import torch
+import logging
+import psutil
 
 from inkler.constants import ROMAN_MAP
+
+logger = logging.getLogger(__name__)
 
 
 def roman_to_int(s: str):
@@ -83,7 +87,6 @@ def index_reduce_mps(
     out_idx = None
     if reduce == "sum":
         out = out.scatter_add(dim, index_expanded, source)
-        out = out.narrow(dim, 0, garbage)
         out_idx = None
 
     elif reduce == "mean":
@@ -94,19 +97,29 @@ def index_reduce_mps(
         count = count.scatter_add(dim, index_expanded, torch.ones_like(source))
         count = torch.clamp(count, min=1)
         out = tmp / count
-        out = out.narrow(dim, 0, garbage)
         out_idx = None
 
     elif reduce in ("amax", "amin"):
-        out = torch.scatter_reduce(
-            out,
-            dim,
-            index_expanded,
-            source,
-            reduce=reduce,
-            include_self=include_self,
-        )
-        out = out.narrow(dim, 0, garbage)
+        if input.device.type == "mps" and torch.are_deterministic_algorithms_enabled():
+            out = torch.scatter_reduce(
+                out.cpu(),
+                dim,
+                index_expanded.cpu(),
+                source.cpu(),
+                reduce=reduce,
+                include_self=include_self,
+            ).to(input.device)
+        else:
+            out = torch.scatter_reduce(
+                out,
+                dim,
+                index_expanded,
+                source,
+                reduce=reduce,
+                include_self=include_self,
+            )
+
+
         if return_idx:
             # fetch max positions
             # remember that it's pooled individually per dimension over the sequence
@@ -129,7 +142,7 @@ def index_reduce_mps(
             ).to(torch.float32)
 
             max_indices = torch.full(
-                out.shape,
+                (out.shape[0] - 1, out.shape[1]),
                 invalid_position,
                 device=source.device,
                 dtype=torch.float32,
@@ -151,8 +164,23 @@ def index_reduce_mps(
     else:
         raise NotImplementedError(f"{reduce} not supported")
 
+    out = out.narrow(dim, 0, garbage)
     return out, out_idx
 
 
 def get_git_revision_short_hash() -> str:
     return subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
+
+
+def log_mps_memory(prefix: str = "", device: str = "mps"):
+    if torch.backends.mps.is_available() and "mps" in device.lower():
+        allocated = torch.mps.current_allocated_memory() / 2**30
+        driver = torch.mps.driver_allocated_memory() / 2**30
+        logger.debug(f"{prefix}: MPS tensor={allocated:.2f} GB, driver={driver:.2f} GB")
+    elif torch.cuda.is_available() and "cuda" in device.lower():
+        allocated = torch.cuda.memory_allocated() / 2 ** 30
+        logger.debug(f"{prefix}: CUDA tensor={allocated:.2f} GB")
+    else:
+        process = psutil.Process()
+        allocated = process.memory_info().rss / 2**30
+        logger.debug(f"{prefix}: CPU tensor={allocated:.2f} GB")

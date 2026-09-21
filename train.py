@@ -47,7 +47,7 @@ def main(args):
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     cnsl = logging.StreamHandler()
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,  #todo flag
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%y-%m-%d %H:%M",
         handlers=[cnsl]

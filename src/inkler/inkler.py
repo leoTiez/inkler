@@ -13,6 +13,7 @@ from matplotlib import pyplot as plt
 from inkler import sdp
 from inkler.constants import N_GENRES
 from inkler.renderer import DifferentiableGlyphRenderer
+from inkler import utils
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,22 @@ class InklerGenre(InklerOut):
 
 
 class InklerGlyph(torch.nn.Module):
+    """
+    Parameterization of a quadratic Bézier curve
+    B(t) = (1−t)^2 P0 + 2(1−t)t P1 + t^2P2.
+         = P0 + 2t(P1−P0) + t^2(P0−2P1+P2).
+
+    using
+    (position, length, angle, width, curvature)
+    p(t) = (C−2ℓu)+t(ℓu+4cℓv)−t^2(4cℓv).
+    with C=[x y], u=[cosα sinα], v=[−sinα cosα].
+
+    P0 = C − 2ℓu
+    P1 = C + 2cℓv.
+    P0 = C + 2ℓu
+    --> the curvature here represents how P0 and P2 change with respect to control point P1
+
+    """
     def __init__(self, d_model=384, n_strokes=16):
         super().__init__()
         self.n_strokes = n_strokes
@@ -90,11 +107,11 @@ class InklerGlyph(torch.nn.Module):
             torch.nn.GELU(),
             torch.nn.Linear(128, 256),
             torch.nn.GELU(),
-            torch.nn.Linear(256, n_strokes * 6)
+            torch.nn.Linear(256, n_strokes * 7)
         )
 
     def forward(self, z):
-        theta = self.net(z).view(-1, self.n_strokes, 6)
+        theta = self.net(z).view(-1, self.n_strokes, 7)
         # Position in [0,1]
         xy = torch.sigmoid(theta[..., 0:2])
         # Length
@@ -102,16 +119,19 @@ class InklerGlyph(torch.nn.Module):
         # Angle
         angle = torch.tanh(theta[..., 3:4]) * torch.pi
         # Width
-        width = torch.tanh(theta[..., 4:5])
+        width = torch.sigmoid(theta[..., 4:5])
         # Curvature
         curvature = torch.tanh(theta[..., 5:6])
+        # activation
+        activation = torch.sigmoid(theta[..., 6:7])
 
         return torch.cat([
             xy,
             length,
             angle,
             width,
-            curvature
+            curvature,
+            activation
         ], dim=-1)
 
 
@@ -119,7 +139,7 @@ class GlyphDecoder(torch.nn.Module):
     def __init__(self, n_strokes=16, d_model=384):
         super().__init__()
         self.net = torch.nn.Sequential(
-            torch.nn.Linear(n_strokes * 6, 256),
+            torch.nn.Linear(n_strokes * 7, 256),
             torch.nn.GELU(),
             torch.nn.Linear(256, 256),
             torch.nn.GELU(),
@@ -155,7 +175,7 @@ class Inkler(pl.LightningModule):
             decode_weight: float = 1.,
             genre_weight: float = .1,
             sparsity_weight: float = 0.05,
-            sig_weight: float = 0.1,
+            sig_weight: float = 0.2,
             betas: Tuple[float, float] = (.9, 0.999),
             optim_params: Dict = {},
             scheduler_params: Dict | None = None,
@@ -289,7 +309,7 @@ class Inkler(pl.LightningModule):
     ) -> Dict:
         document_x, level_dict, deplex_idx, deplex_mask = self.inkler_embedder(
             x=x_sentence,
-            hierarchy_x=self.doc_token.tile(dims=(x_sentence.shape[0], 1, 1)),
+            hierarchy_x=self.doc_token.expand(x_sentence.shape[0], -1, -1),
             hierarchy=hierarchy,
             attention_mask=attention_mask,
         )
@@ -345,16 +365,12 @@ class Inkler(pl.LightningModule):
                 dec_e = dec_e + self.dec_loss(
                     fwd_out[f"dec_{level}"].reshape(-1, self.d_model), fwd_out[f"enc_{level}"].reshape(-1, self.d_model)
                 )
-            sparsity_e = sparsity_e + fwd_out[f"glyph_{level}"][..., 4].masked_fill(
-                fwd_out[f"glyph_{level}"][..., 4] <= 0.,
-                0.
-            ).mean()
-            sparsity_e = sparsity_e.mean()
+            sparsity_e = sparsity_e + fwd_out[f"glyph_{level}"][..., -1].mean()
 
         recon_e = recon_e / float(fwd_out["n_levels"])
         sparsity_e = sparsity_e / float(fwd_out["n_levels"])
         dec_e = dec_e / float(fwd_out["n_levels"] - 1)
-        postit_e = torch.tensor(0.)
+        postit_e = torch.tensor(0., device=fwd_out["genre"].device)
         if postits is not None:
             # Equivalent to `self.mse(postits[not_inf_mask], document_x[not_inf_mask])`
             # guarded by `if torch.any(not_inf_mask)`, but avoids the boolean-mask
@@ -387,23 +403,31 @@ class Inkler(pl.LightningModule):
             self,
             batch: Dict,
     ):
+
         result_dict = self(
             x_sentence=batch["texts"],
             hierarchy=batch["hierarchy"],
             attention_mask=batch["masks"],
         )
+        utils.log_mps_memory("After forward", device=self.device.type)
+
         loss_dict = self.loss(
             fwd_out=result_dict,
             true_score=batch["scores"],
             true_genre=batch["genres"],
             postits=batch.get("postits", None),
         )
-        with torch.no_grad():
-            self.log(name="train_loss", value=loss_dict["total_loss"], on_step=True, on_epoch=False, prog_bar=True)
-            for loss_name, loss_val in loss_dict.items():
-                if loss_name != "total_loss":
-                    self.log(name=f"train_{loss_name}", value=loss_val, on_step=True, on_epoch=True, prog_bar=True)
+        utils.log_mps_memory("After loss calculation", device=self.device.type)
 
+        self.log(name="train_loss", value=loss_dict["total_loss"], on_step=True, on_epoch=False, prog_bar=True)
+        for loss_name, loss_val in loss_dict.items():
+            if loss_name != "total_loss":
+                self.log(name=f"train_{loss_name}", value=loss_val, on_step=True, on_epoch=True, prog_bar=True)
+
+        if self.device.type == "mps":
+            torch.mps.synchronize()
+            torch.mps.empty_cache()
+            utils.log_mps_memory("After emptying MPS cache", device=self.device.type)
         return loss_dict["total_loss"]
 
     @torch.no_grad()
@@ -439,6 +463,8 @@ class Inkler(pl.LightningModule):
                 fig.tight_layout()
                 fig.savefig(f"{self.glyph_log_dir}/{save_name}")
                 plt.close(fig)
+            del rendered_glyph
+        plt.close("all")
         return loss["total_loss"]
 
     @torch.no_grad()

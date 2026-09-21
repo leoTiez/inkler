@@ -4,6 +4,7 @@ import torch
 
 from inkler.modules import XCA, AttentionWrapper, Pooler, Unpooler
 from inkler.utils import index_reduce_mps
+from inkler.constants import BUCKETS
 
 
 class StructureTransformer(torch.nn.Module):
@@ -299,12 +300,9 @@ class StructuralDocumentProcessor(torch.nn.Module):
             raise ValueError("n_blocks must be a positive integer")
         self.n_blocks = n_blocks
 
-        if seq_len < 1:
-            raise ValueError("seq_len must be a positive integer")
-        self.seq_len = seq_len
         self.register_buffer(
             "pe",
-            self._create_pe(self.seq_len, self.d_model)
+            self._create_pe(max(BUCKETS), self.d_model)
         )
 
         self.sdp_blocks = torch.nn.ModuleList([
@@ -374,9 +372,6 @@ class StructuralDocumentDecoder(torch.nn.Module):
             raise ValueError("n_blocks must be a positive integer")
         self.n_blocks = n_blocks
 
-        if seq_len < 1:
-            raise ValueError("seq_len must be a positive integer")
-        self.seq_len = seq_len
         self.sdp_blocks = torch.nn.ModuleList([
                 SDPDecoderBlock(
                     d_model=self.d_model,

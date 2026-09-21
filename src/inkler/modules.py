@@ -141,7 +141,7 @@ class Unpooler(torch.nn.Module):
         )
 
         # important for amax cos only scattered to original position
-        out_flat = torch.ones((batch_size * seq_len, x_dim), device=pooled.device, dtype=pooled.dtype,) * self.token
+        out_flat = torch.ones((batch_size * seq_len + 1, x_dim), device=pooled.device, dtype=pooled.dtype,) * self.token
         # scatter to original position, if amax only one position
         out_flat = torch.scatter(
             out_flat,
@@ -149,6 +149,7 @@ class Unpooler(torch.nn.Module):
             index=flat_target.reshape(-1, x_dim),
             src=pooled.reshape(-1, x_dim),
         )
+
 
         # remove garbage
         return out_flat[: batch_size * seq_len].reshape(batch_size, seq_len, x_dim)

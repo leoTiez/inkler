@@ -25,10 +25,10 @@ class DifferentiableGlyphRenderer(nn.Module):
 
     def __init__(
             self,
-            image_size=64,
-            n_samples=64,
-            max_width=0.08,
-            min_width=0.001,
+            image_size=128,
+            n_samples=128,
+            max_width=0.01,
+            min_width=0.0005,
             max_length=1.0,
             raster_temperature=0.002,
             margin: float = .1,
@@ -62,7 +62,7 @@ class DifferentiableGlyphRenderer(nn.Module):
             n_samples
         )
         self.margin = margin
-        self.threshold = threshold
+        self.thresh = threshold
         self.register_buffer("t", t)
 
     def stroke_centerline(self, theta):
@@ -152,11 +152,7 @@ class DifferentiableGlyphRenderer(nn.Module):
 
         return torch.stack([px, py], dim=-1)
 
-    def render_single_stroke(
-        self,
-        points,
-        width,
-    ):
+    def render_single_stroke(self, points, width):
         """
         Differentiably rasterize one stroke.
 
@@ -238,8 +234,8 @@ class DifferentiableGlyphRenderer(nn.Module):
         alpha = torch.sigmoid(
             (radius2 - soft_d2) / softness
         )
-        if threshold is not None:
-            alpha = (alpha > 0.5).float()
+        if self.thresh is not None:
+            alpha = (alpha > self.thresh).float()
         return alpha
 
     def forward(self, theta):
@@ -270,8 +266,8 @@ class DifferentiableGlyphRenderer(nn.Module):
         # theta[..., 4] is assumed to already be in [0,1].
         # --------------------------------------------------
 
-        width_parameter = theta[..., 4].relu()
-        active = (width_parameter > 0).float()
+        width_parameter = theta[..., 4]
+        active = (theta[..., -1] > self.thresh).float()
 
         width = (
             self.min_width * active

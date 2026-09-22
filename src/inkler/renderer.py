@@ -268,7 +268,6 @@ class DifferentiableGlyphRenderer(nn.Module):
 
         width_parameter = theta[..., 4]
         active = (theta[..., -1] > self.thresh).float()
-
         width = (
             self.min_width * active
             + width_parameter
@@ -281,26 +280,14 @@ class DifferentiableGlyphRenderer(nn.Module):
         # --------------------------------------------------
         # Render every stroke
         # --------------------------------------------------
-
         stroke_images = []
-
         K = theta.shape[1]
-
         for k in range(K):
-
-            stroke = self.render_single_stroke(
-                points[:, k],
-                width[:, k:k+1],
-            )
-
+            stroke = self.render_single_stroke(points[:, k], width[:, k:k+1])
             stroke_images.append(stroke)
 
         # [B, K, H, W]
-        strokes = torch.stack(
-            stroke_images,
-            dim=1
-        )
-
+        strokes = torch.stack(stroke_images, dim=1)
         # --------------------------------------------------
         # Alpha compositing.
         #
@@ -309,7 +296,6 @@ class DifferentiableGlyphRenderer(nn.Module):
         #
         # 1 - product(1-alpha_k)
         # --------------------------------------------------
-
         glyph = 1.0 - torch.prod(
             1.0 - strokes.clamp(0, 1),
             dim=1

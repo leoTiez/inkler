@@ -148,9 +148,6 @@ class GlyphDecoder(torch.nn.Module):
         self.act_thresh = act_thresh
 
     def forward(self, theta):
-        theta_ = theta[..., 0:-1]
-        activation = (theta[..., -2:-1] > self.act_thresh).float()
-        theta = torch.cat([theta_, activation], dim=-1)
         return self.net(theta.flatten(1))
 
 

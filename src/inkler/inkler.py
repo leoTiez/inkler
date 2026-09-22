@@ -136,7 +136,7 @@ class InklerGlyph(torch.nn.Module):
 
 
 class GlyphDecoder(torch.nn.Module):
-    def __init__(self, n_strokes=16, d_model=384):
+    def __init__(self, n_strokes=16, d_model=384, act_thresh: float = .5):
         super().__init__()
         self.net = torch.nn.Sequential(
             torch.nn.Linear(n_strokes * 7, 256),
@@ -145,8 +145,12 @@ class GlyphDecoder(torch.nn.Module):
             torch.nn.GELU(),
             torch.nn.Linear(256, d_model)
         )
+        self.act_thresh = act_thresh
 
     def forward(self, theta):
+        theta_ = theta[..., 0:-1]
+        activation = (theta[..., -2:-1] > self.act_thresh).float()
+        theta = torch.cat([theta_, activation], dim=-1)
         return self.net(theta.flatten(1))
 
 

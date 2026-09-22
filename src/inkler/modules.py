@@ -58,7 +58,8 @@ class Pooler(torch.nn.Module):
         document_id = document_id.to(torch.int)
         # select how far indices range per data point in batch
         min_val = torch.where(mask, document_id, torch.inf).min(-1)[0].to(torch.int)
-        range_size = document_id.max(-1)[0] - min_val
+        max_val = torch.where(mask, document_id, -torch.inf).max(-1)[0].to(torch.int)
+        range_size = max_val - min_val
         # create new output tensor that is as big as max range
         out_size = int(torch.max(range_size) + 1)  # plus one to convert from index to size
         dist_buckets = torch.tensor(BUCKETS, dtype=torch.float32) - out_size
@@ -77,13 +78,14 @@ class Pooler(torch.nn.Module):
             batch_size,
             device=x_.device
         ).reshape(-1, 1) * out_size
+        collate_idx = torch.where(mask, document_id + add_idx, -1)
 
         # collate data values over indices that are aggregated over hierarchical document ids + offset,
         # index_reduce_mps is an mps-friendly implementation of the index_reduce tensor function
         t_, out_idx = index_reduce_mps(
             input=t_,
             dim=0,
-            index=(document_id + add_idx).flatten(),
+            index=collate_idx.flatten(),
             source=x_.reshape(-1, x_dim),
             reduce=self.pooling,
             include_self=False,

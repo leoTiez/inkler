@@ -156,6 +156,7 @@ class SDPEncoderBlock(torch.nn.Module):
         sentence_embedding = None
         out_embedding = {-1: x.clone()}
         deplex_idx, deplex_mask = [], {}
+        hid_idx = []
         if attention_mask.is_floating_point():
             attention_mask = attention_mask.to(torch.bool)
         # two attention masks, one that remains in passed dimensionality
@@ -185,25 +186,26 @@ class SDPEncoderBlock(torch.nn.Module):
             # adapt hierarchy ids to new layout
             if i_d < len(self.st_layers) - 1:
                 # compute offset and collation as for the pooling but mus be performed over unchanged attention masl
-                hid = -torch.ones(np.prod(x.shape[:2]), device=x.device)
+                hid_ = -torch.ones(np.prod(x.shape[:2]), device=x.device)
                 min_val = torch.where(attention_mask, hierarchy[..., -(i_d + 1)], torch.inf).min(-1)[0].to(torch.int)
                 add_idx = -min_val.reshape(-1, 1) + torch.arange(
                     x.shape[0],
                     device=x.device,
                 ).reshape(-1, 1) * x.shape[1]
+                collate_idx = torch.where(attention_mask, hierarchy[..., -(i_d + 1)] + add_idx, -1).to(torch.int)
                 # collate indices
-                hid, _ = index_reduce_mps(
-                    input=hid,
+                hid_, _ = index_reduce_mps(
+                    input=hid_,
                     dim=0,
-                    index=(hierarchy[..., -(i_d + 1)] + add_idx).to(torch.int).flatten(),
+                    index=collate_idx.flatten(),
                     source=hierarchy[..., -(i_d + 2)].flatten(),
                     reduce="amax",
                     include_self=False,
                     mask=attention_mask.flatten(),
                     return_idx=False
                 )
-                hid = hid.reshape(x.shape[:2])
-
+                hid = hid_.reshape(x.shape[:2])
+                hid_idx.append(hid.clone())
         # return sentence embedding and class token
         return sentence_embedding, x, out_embedding, deplex_idx, deplex_mask
 

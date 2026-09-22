@@ -317,12 +317,15 @@ class Inkler(pl.LightningModule):
             hierarchy=hierarchy,
             attention_mask=attention_mask,
         )
-        # decode_x = self.inkler_decoder(
-        #     x=level_dict,
-        #     deplex_idx=deplex_idx,
-        #     deplex_mask=deplex_mask,
-        #     hierarchy_x=document_x,
-        # )
+        decode_x = self.inkler_decoder(
+            x={
+                k: v + self.sig * torch.randn_like(v)  # reparameterize
+                for k, v in level_dict.items()
+            },
+            deplex_idx=deplex_idx,
+            deplex_mask=deplex_mask,
+            hierarchy_x=document_x,
+        )
 
         inkler_glyph = {}
         glyph_decoder = {}
@@ -332,15 +335,15 @@ class Inkler(pl.LightningModule):
             )
             glyph_decoder[f"recon_{level}"] = self.glyph_decoder(inkler_glyph[f"glyph_{level}"])
 
-        decode_x = self.inkler_decoder(
-            x={
-                int(k.replace("recon_", "")): v.reshape(level_dict[int(k.replace("recon_", ""))].shape)
-                for k, v in glyph_decoder.items()
-            },
-            deplex_idx=deplex_idx,
-            deplex_mask=deplex_mask,
-            hierarchy_x=document_x,
-        )
+        # decode_x = self.inkler_decoder(
+        #     x={
+        #         int(k.replace("recon_", "")): v.reshape(level_dict[int(k.replace("recon_", ""))].shape)
+        #         for k, v in glyph_decoder.items()
+        #     },
+        #     deplex_idx=deplex_idx,
+        #     deplex_mask=deplex_mask,
+        #     hierarchy_x=document_x,
+        # )
 
         # score = self.inkler_score(document_x)
         genre = self.inkler_genre(document_x)

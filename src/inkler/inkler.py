@@ -315,10 +315,7 @@ class Inkler(pl.LightningModule):
             attention_mask=attention_mask,
         )
         decode_x = self.inkler_decoder(
-            x={
-                k: v + self.sig * torch.randn_like(v)  # reparameterize
-                for k, v in level_dict.items()
-            },
+            x=level_dict,
             deplex_idx=deplex_idx,
             deplex_mask=deplex_mask,
             hierarchy_x=document_x,

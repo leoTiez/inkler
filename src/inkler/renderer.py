@@ -30,7 +30,7 @@ class DifferentiableGlyphRenderer(nn.Module):
             max_width=0.001,
             min_width=0.0001,
             max_length=1.0,
-            raster_temperature=0.002,
+            raster_temperature=0.0001,
             margin: float = .1,
             threshold: float| None = 0.5,
     ):
@@ -81,7 +81,7 @@ class DifferentiableGlyphRenderer(nn.Module):
         y = theta[..., 1]
         length = theta[..., 2]
         angle = theta[..., 3]
-        curvature = theta[..., 5]
+        curvature = theta[..., 4]
 
         # --------------------------------------------------
         # Orientation vectors
@@ -194,16 +194,16 @@ class DifferentiableGlyphRenderer(nn.Module):
 
         d2 = dx**2 + dy**2
 
-        # --------------------------------------------------
-        # Soft minimum over centerline samples.
+        # # --------------------------------------------------
+        # # Soft minimum over centerline samples.
+        # #
+        # # This approximates:
+        # #
+        # # min_s ||pixel - p_s||²
+        # #
+        # # while remaining differentiable.
+        # # --------------------------------------------------
         #
-        # This approximates:
-        #
-        # min_s ||pixel - p_s||²
-        #
-        # while remaining differentiable.
-        # --------------------------------------------------
-
         tau = self.raster_temperature
 
         soft_d2 = -tau * torch.logsumexp(
@@ -213,30 +213,32 @@ class DifferentiableGlyphRenderer(nn.Module):
 
         soft_d2 = soft_d2.clamp_min(0.0)
 
-        # --------------------------------------------------
-        # Convert distance to soft coverage.
+        # # --------------------------------------------------
+        # # Convert distance to soft coverage.
+        # #
+        # # Pixels inside the stroke become ~1.
+        # # Pixels outside become ~0.
+        # # --------------------------------------------------
         #
-        # Pixels inside the stroke become ~1.
-        # Pixels outside become ~0.
-        # --------------------------------------------------
+        # radius = width.squeeze(-1) / 2.0
+        #
+        # # [B, 1, 1]
+        # radius2 = radius[:, None, None] ** 2
+        #
+        # # Width-dependent antialiasing.
+        # softness = (
+        #     0.25 * radius2
+        #     + 1e-5
+        # )
+        #
+        # alpha = torch.sigmoid(
+        #     (radius2 - soft_d2) / softness
+        # )
+        # if self.thresh is not None:
+        #     alpha = (alpha > self.thresh).float()
+        # return (soft_d2 < width.unsqueeze(-1)).float()
 
-        radius = width.squeeze(-1) / 2.0
-
-        # [B, 1, 1]
-        radius2 = radius[:, None, None] ** 2
-
-        # Width-dependent antialiasing.
-        softness = (
-            0.25 * radius2
-            + 1e-5
-        )
-
-        alpha = torch.sigmoid(
-            (radius2 - soft_d2) / softness
-        )
-        if self.thresh is not None:
-            alpha = (alpha > self.thresh).float()
-        return alpha
+        return (soft_d2 < width.unsqueeze(-1)).float()
 
     def forward(self, theta):
         """
@@ -266,16 +268,17 @@ class DifferentiableGlyphRenderer(nn.Module):
         # theta[..., 4] is assumed to already be in [0,1].
         # --------------------------------------------------
 
-        width_parameter = theta[..., 4]
+        # width_parameter = theta[..., 4]
         active = (theta[..., -1] > self.thresh).float()
-        width = (
-            self.min_width * active
-            + width_parameter
-            * (
-                self.max_width
-                - self.min_width
-            )
-        )
+        width = self.min_width * active
+            # (
+            # self.min_width * active
+            # + width_parameter
+            # * (
+            #     self.max_width
+            #     - self.min_width
+            # )
+
 
         # --------------------------------------------------
         # Render every stroke

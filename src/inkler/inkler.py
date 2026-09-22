@@ -107,29 +107,29 @@ class InklerGlyph(torch.nn.Module):
             torch.nn.GELU(),
             torch.nn.Linear(128, 256),
             torch.nn.GELU(),
-            torch.nn.Linear(256, n_strokes * 7)
+            torch.nn.Linear(256, n_strokes * 6)
         )
 
     def forward(self, z):
-        theta = self.net(z).view(-1, self.n_strokes, 7)
+        theta = self.net(z).view(-1, self.n_strokes, 6)
         # Position in [0,1]
         xy = torch.sigmoid(theta[..., 0:2])
         # Length
         length = torch.sigmoid(theta[..., 2:3])
         # Angle
         angle = torch.tanh(theta[..., 3:4]) * torch.pi
-        # Width
-        width = torch.sigmoid(theta[..., 4:5])
+        # # Width
+        # width = torch.sigmoid(theta[..., 4:5])
         # Curvature
-        curvature = torch.tanh(theta[..., 5:6])
+        curvature = torch.tanh(theta[..., 4:5])
         # activation
-        activation = torch.sigmoid(theta[..., 6:7])
+        activation = torch.sigmoid(theta[..., 5:6])
 
         return torch.cat([
             xy,
             length,
             angle,
-            width,
+            # width,
             curvature,
             activation
         ], dim=-1)
@@ -139,7 +139,7 @@ class GlyphDecoder(torch.nn.Module):
     def __init__(self, n_strokes=16, d_model=384, act_thresh: float = .5):
         super().__init__()
         self.net = torch.nn.Sequential(
-            torch.nn.Linear(n_strokes * 7, 256),
+            torch.nn.Linear(n_strokes * 6, 256),
             torch.nn.GELU(),
             torch.nn.Linear(256, 256),
             torch.nn.GELU(),

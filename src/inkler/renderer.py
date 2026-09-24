@@ -27,8 +27,7 @@ class DifferentiableGlyphRenderer(nn.Module):
             self,
             image_size=128,
             n_samples=128,
-            max_width=0.001,
-            min_width=0.0001,
+            width=0.0005,
             max_length=1.0,
             raster_temperature=0.0001,
             margin: float = .1,
@@ -38,8 +37,7 @@ class DifferentiableGlyphRenderer(nn.Module):
 
         self.image_size = image_size
         self.n_samples = n_samples
-        self.max_width = max_width
-        self.min_width = min_width
+        self.width = width
         self.max_length = max_length
         self.raster_temperature = raster_temperature
 
@@ -270,7 +268,7 @@ class DifferentiableGlyphRenderer(nn.Module):
 
         # width_parameter = theta[..., 4]
         active = (theta[..., -1] > self.thresh).float()
-        width = self.min_width * active
+        width = self.width * active
             # (
             # self.min_width * active
             # + width_parameter

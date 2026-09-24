@@ -10,10 +10,12 @@ from transformers.activations import ACT2FN
 import pytorch_lightning as pl
 from matplotlib import pyplot as plt
 
-from inkler import sdp
+from inkler import sdp, renderer
 from inkler.constants import N_GENRES
 from inkler.renderer import DifferentiableGlyphRenderer
 from inkler import utils
+from inkler.stroke_topology import get_stroke_topology
+from inkler.bezier import contact_loss, BezierInklerGlyph as InklerGlyph, BezierGlyphDecoder as GlyphDecoder
 
 logger = logging.getLogger(__name__)
 
@@ -82,75 +84,6 @@ class InklerGenre(InklerOut):
         return self.genre_fn(self.out(x))
 
 
-class InklerGlyph(torch.nn.Module):
-    """
-    Parameterization of a quadratic Bézier curve
-    B(t) = (1−t)^2 P0 + 2(1−t)t P1 + t^2P2.
-         = P0 + 2t(P1−P0) + t^2(P0−2P1+P2).
-
-    using
-    (position, length, angle, width, curvature)
-    p(t) = (C−2ℓu)+t(ℓu+4cℓv)−t^2(4cℓv).
-    with C=[x y], u=[cosα sinα], v=[−sinα cosα].
-
-    P0 = C − 2ℓu
-    P1 = C + 2cℓv.
-    P0 = C + 2ℓu
-    --> the curvature here represents how P0 and P2 change with respect to control point P1
-
-    """
-    def __init__(self, d_model=384, n_strokes=16):
-        super().__init__()
-        self.n_strokes = n_strokes
-        self.net = torch.nn.Sequential(
-            torch.nn.Linear(d_model, 128),
-            torch.nn.GELU(),
-            torch.nn.Linear(128, 256),
-            torch.nn.GELU(),
-            torch.nn.Linear(256, n_strokes * 6)
-        )
-
-    def forward(self, z):
-        theta = self.net(z).view(-1, self.n_strokes, 6)
-        # Position in [0,1]
-        xy = torch.sigmoid(theta[..., 0:2])
-        # Length
-        length = torch.sigmoid(theta[..., 2:3])
-        # Angle
-        angle = torch.tanh(theta[..., 3:4]) * torch.pi
-        # # Width
-        # width = torch.sigmoid(theta[..., 4:5])
-        # Curvature
-        curvature = torch.tanh(theta[..., 4:5])
-        # activation
-        activation = torch.sigmoid(theta[..., 5:6])
-
-        return torch.cat([
-            xy,
-            length,
-            angle,
-            # width,
-            curvature,
-            activation
-        ], dim=-1)
-
-
-class GlyphDecoder(torch.nn.Module):
-    def __init__(self, n_strokes=16, d_model=384, act_thresh: float = .5):
-        super().__init__()
-        self.net = torch.nn.Sequential(
-            torch.nn.Linear(n_strokes * 6, 256),
-            torch.nn.GELU(),
-            torch.nn.Linear(256, 256),
-            torch.nn.GELU(),
-            torch.nn.Linear(256, d_model)
-        )
-        self.act_thresh = act_thresh
-
-    def forward(self, theta):
-        return self.net(theta.flatten(1))
-
-
 class Inkler(pl.LightningModule):
     def __init__(
             self,
@@ -174,6 +107,7 @@ class Inkler(pl.LightningModule):
             recon_weight: float = 1.,
             postit_weight: float = 1.,
             decode_weight: float = 1.,
+            topology_weight: float = 1.,
             genre_weight: float = .1,
             sparsity_weight: float = 0.05,
             sig_weight: float = 0.2,
@@ -204,6 +138,7 @@ class Inkler(pl.LightningModule):
         if n_hierarchy < 1:
             raise ValueError("n_hierarchy must be larger than 0")
         self.n_hierarchy = n_hierarchy
+        self.n_strokes = n_strokes
         self.register_buffer("doc_token", torch.ones((1, 1, self.d_model)) * doc_token_fill)
         self.inkler_embedder = sdp.StructuralDocumentProcessor(
             d_model=self.d_model,
@@ -227,8 +162,8 @@ class Inkler(pl.LightningModule):
             n_xca=n_xca,
         )
 
-        self.inkler_glyph = InklerGlyph(d_model=d_model, n_strokes=n_strokes)
-        self.glyph_decoder = GlyphDecoder(d_model=d_model, n_strokes=n_strokes)
+        self.inkler_glyph = InklerGlyph(d_model=self.d_model, n_strokes=self.n_strokes)
+        self.glyph_decoder = GlyphDecoder(d_model=self.d_model, n_strokes=self.n_strokes)
 
         self.inkler_genre = InklerGenre(
             n_genre=n_genre,
@@ -252,6 +187,7 @@ class Inkler(pl.LightningModule):
         self.genre_w = genre_weight
         self.postit_w = postit_weight
         self.decode_w = decode_weight
+        self.topology_w = topology_weight
         self.sig = sig_weight
         self.class_loss = torch.nn.BCELoss(reduction="mean")
         self.recon_loss = torch.nn.MSELoss(reduction="mean")
@@ -367,6 +303,7 @@ class Inkler(pl.LightningModule):
         recon_e = torch.tensor(0., device=fwd_out["genre"].device)
         dec_e = torch.tensor(0., device=fwd_out["genre"].device)
         sparsity_e = torch.tensor(0., device=fwd_out["genre"].device)
+        topology_e = torch.tensor(0., device=fwd_out["genre"].device)
         for level in range(-1, fwd_out["n_levels"] - 1):  # shifted by 1
             recon_e = recon_e + self.recon_loss(
                 fwd_out[f"recon_{level}"].reshape(-1, self.d_model), fwd_out[f"enc_{level}"].reshape(-1, self.d_model)
@@ -376,10 +313,23 @@ class Inkler(pl.LightningModule):
                     fwd_out[f"dec_{level}"].reshape(-1, self.d_model), fwd_out[f"enc_{level}"].reshape(-1, self.d_model)
                 )
             sparsity_e = sparsity_e + fwd_out[f"glyph_{level}"][..., -1].mean()
+            stroke_topology = get_stroke_topology(
+                n_strokes=self.n_strokes,
+                n_connect=3 + level,
+                use_connector_stroke=level == fwd_out["n_levels"] - 2
+            ).to(fwd_out["genre"].device)
+            topology_e = topology_e + contact_loss(
+                fwd_out[f"glyph_{level}"],
+                allowed_matrix=stroke_topology,
+                contact_threshold=self.renderer.width
+            )
+
+
 
         recon_e = recon_e / float(fwd_out["n_levels"])
         sparsity_e = sparsity_e / float(fwd_out["n_levels"])
         dec_e = dec_e / float(fwd_out["n_levels"] - 1)
+        topology_e = topology_e / float(fwd_out["n_levels"])
         postit_e = torch.tensor(0., device=fwd_out["genre"].device)
         if postits is not None:
             # Equivalent to `self.mse(postits[not_inf_mask], document_x[not_inf_mask])`
@@ -400,12 +350,14 @@ class Inkler(pl.LightningModule):
             "recon_loss": recon_e,
             "sparsity_loss": sparsity_e,
             "decoder_loss": dec_e,
+            "topology_loss": topology_e,
             "total_loss": (
                     self.genre_w * genre_e
                     + self.postit_w * postit_e
                     + self.recon_w * recon_e
                     + self.sparsity_w * sparsity_e
                     + self.decode_w * dec_e
+                    + self.topology_w * topology_e
             )
         }
 

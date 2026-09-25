@@ -2,86 +2,23 @@ import logging
 from typing import Callable, Tuple, Dict
 from pathlib import Path
 import os
-import math
 
 import torch
 from pytorch_lightning.utilities.types import OptimizerLRScheduler
-from transformers.activations import ACT2FN
 import pytorch_lightning as pl
 from matplotlib import pyplot as plt
 
-from inkler import sdp, renderer
+from inkler import sdp
 from inkler.constants import N_GENRES
-from inkler.renderer import DifferentiableGlyphRenderer
 from inkler import utils
 from inkler.stroke_topology import get_stroke_topology
-from inkler.bezier import contact_loss, BezierInklerGlyph as InklerGlyph, BezierGlyphDecoder as GlyphDecoder
+from inkler.suppl_inkler import InklerScore, InklerGenre, GlyphDecoder
+from inkler.renderer import GlyphRenderer
+
+from inkler.lexic.glyphmap import LexicCharacterStrokes, LexicInklerGlyph, lexic_contact_loss
+from inkler.lexic.bezier import BezierCharacterStrokes, BezierInklerGlyph, bezier_contact_loss
 
 logger = logging.getLogger(__name__)
-
-
-class InklerOut(torch.nn.Module):
-    def __init__(
-            self,
-            d_model: int = int(2**9),
-            act_fn: str | Callable | None = "relu",
-            norm_eps: float = 1e-6
-    ):
-        super(InklerOut, self).__init__()
-        self.d_model = d_model
-        self.flatten = torch.nn.Flatten()
-        self.norm = torch.nn.LayerNorm(d_model, eps=norm_eps)
-        self.dense = torch.nn.Linear(self.d_model, self.d_model)
-        self.act_fn = self._convert_activation(act_fn)
-
-    @staticmethod
-    def _convert_activation(act_fn: str | Callable | None = None) -> Callable:
-        if act_fn is None:
-            return lambda _: _
-        elif isinstance(act_fn, str):
-            return ACT2FN[act_fn]
-        else:
-            return act_fn
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.flatten(x)
-        x = self.dense(self.norm(x))
-        return self.act_fn(x)
-
-
-class InklerScore(InklerOut):
-    def __init__(
-            self,
-            d_model: int = int(2**9),
-            act_fn: str | Callable | None = "relu",
-            score_fn: str | Callable | None = "linear",
-            norm_eps: float = 1e-6
-    ):
-        super(InklerScore, self).__init__(d_model=d_model, act_fn=act_fn, norm_eps=norm_eps)
-        self.out = torch.nn.Linear(d_model, 1)
-        self.score_fn = self._convert_activation(score_fn)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = super(InklerScore, self).forward(x)
-        return self.score_fn(self.out(x))
-
-
-class InklerGenre(InklerOut):
-    def __init__(
-            self,
-            n_genre: int = N_GENRES,
-            d_model: int = int(2**9),
-            act_fn: str | Callable | None = "relu",
-            genre_fn: str | Callable | None = "sigmoid",
-            norm_eps: float = 1e-6
-    ):
-        super(InklerGenre, self).__init__(d_model=d_model, act_fn=act_fn, norm_eps=norm_eps)
-        self.out = torch.nn.Linear(d_model, n_genre)
-        self.genre_fn = self._convert_activation(genre_fn)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = super(InklerGenre, self).forward(x)
-        return self.genre_fn(self.out(x))
 
 
 class Inkler(pl.LightningModule):
@@ -101,6 +38,7 @@ class Inkler(pl.LightningModule):
             genre_act_fn: str = "sigmoid",
             pooler_type: str = "amax",
             n_genre: int = N_GENRES,
+            glyph_type: str = "lexic",
             dropout: float = 0.1,
             norm_eps: float = 1e-6,
             n_strokes: int = 32,
@@ -111,11 +49,13 @@ class Inkler(pl.LightningModule):
             genre_weight: float = .1,
             sparsity_weight: float = 0.05,
             sig_weight: float = 0.2,
+            n_eval_points: int = 32,
             betas: Tuple[float, float] = (.9, 0.999),
             optim_params: Dict = {},
             scheduler_params: Dict | None = None,
             warmup_params: Dict | None = None,
             render_params: Dict | None = None,
+            character_dict: Dict | None = None,
             **kwargs
     ):
         super(Inkler, self).__init__()
@@ -162,9 +102,18 @@ class Inkler(pl.LightningModule):
             n_xca=n_xca,
         )
 
-        self.inkler_glyph = InklerGlyph(d_model=self.d_model, n_strokes=self.n_strokes)
-        self.glyph_decoder = GlyphDecoder(d_model=self.d_model, n_strokes=self.n_strokes)
+        if n_eval_points < 1:
+            raise ValueError("n_eval_points must be larger than 0")
+        self.n_eval_points = n_eval_points
 
+        if render_params is None:
+            render_params = {}
+
+        self.glyph_decoder = GlyphDecoder(
+            d_model=self.d_model,
+            n_size=self.n_strokes * self.n_eval_points,
+            n_params=2
+        )
         self.inkler_genre = InklerGenre(
             n_genre=n_genre,
             genre_fn=genre_act_fn,
@@ -172,10 +121,20 @@ class Inkler(pl.LightningModule):
             act_fn=out_act_fn,
             norm_eps=norm_eps
         )
+        self.renderer = GlyphRenderer(**render_params)
 
-        if render_params is None:
-            render_params = {}
-        self.renderer = DifferentiableGlyphRenderer(**render_params)
+        if character_dict is None:
+            character_dict = {}
+        if glyph_type.lower() == "lexic":
+            self.inkler_glyph = LexicInklerGlyph(d_model=self.d_model, n_strokes=self.n_strokes)
+            self.character = LexicCharacterStrokes(**character_dict)
+            self.contact_loss = lexic_contact_loss
+        elif glyph_type.lower() == "bezier":
+            self.inkler_glyph = BezierInklerGlyph(d_model=self.d_model, n_strokes=self.n_strokes)
+            self.contact_loss = bezier_contact_loss
+            self.character = BezierCharacterStrokes(**character_dict)
+        else:
+            raise ValueError("Glyph type not supported. Select between lexic and bezier")
 
         self.lr = lr
         self.optim_dict = optim_params
@@ -250,30 +209,30 @@ class Inkler(pl.LightningModule):
             hierarchy=hierarchy,
             attention_mask=attention_mask,
         )
-        decode_x = self.inkler_decoder(
-            x=level_dict,
-            deplex_idx=deplex_idx,
-            deplex_mask=deplex_mask,
-            hierarchy_x=document_x,
-        )
-
         inkler_glyph = {}
         glyph_decoder = {}
+        stroke_points = {}
         for level, embedding in level_dict.items():
             inkler_glyph[f"glyph_{level}"] = self.inkler_glyph(
                 embedding + self.sig * torch.randn_like(embedding)  # reparameterize
             )
-            glyph_decoder[f"recon_{level}"] = self.glyph_decoder(inkler_glyph[f"glyph_{level}"])
+            stroke_topology = get_stroke_topology(
+                n_strokes=self.n_strokes,
+                n_connect=3 + level,
+                use_connector_stroke=level == len(level_dict) - 2
+            ).to(document_x.device)
+            stroke_points[f"stroke_{level}"] = self.character(inkler_glyph[f"glyph_{level}"], topology=stroke_topology)
+            glyph_decoder[f"recon_{level}"] = self.glyph_decoder(stroke_points[f"stroke_{level}"])
 
-        # decode_x = self.inkler_decoder(
-        #     x={
-        #         int(k.replace("recon_", "")): v.reshape(level_dict[int(k.replace("recon_", ""))].shape)
-        #         for k, v in glyph_decoder.items()
-        #     },
-        #     deplex_idx=deplex_idx,
-        #     deplex_mask=deplex_mask,
-        #     hierarchy_x=document_x,
-        # )
+        decode_x = self.inkler_decoder(
+            x={
+                int(k.replace("recon_", "")): v.reshape(level_dict[int(k.replace("recon_", ""))].shape)
+                for k, v in glyph_decoder.items()
+            },
+            deplex_idx=deplex_idx,
+            deplex_mask=deplex_mask,
+            hierarchy_x=document_x,
+        )
 
         # score = self.inkler_score(document_x)
         genre = self.inkler_genre(document_x)
@@ -288,6 +247,7 @@ class Inkler(pl.LightningModule):
             **decoder_dict,
             **inkler_glyph,
             **glyph_decoder,
+            **stroke_points
         }
 
         return out_dict
@@ -302,7 +262,6 @@ class Inkler(pl.LightningModule):
         genre_e = self.class_loss(fwd_out["genre"], true_genre)
         recon_e = torch.tensor(0., device=fwd_out["genre"].device)
         dec_e = torch.tensor(0., device=fwd_out["genre"].device)
-        sparsity_e = torch.tensor(0., device=fwd_out["genre"].device)
         topology_e = torch.tensor(0., device=fwd_out["genre"].device)
         for level in range(-1, fwd_out["n_levels"] - 1):  # shifted by 1
             recon_e = recon_e + self.recon_loss(
@@ -312,22 +271,17 @@ class Inkler(pl.LightningModule):
                 dec_e = dec_e + self.dec_loss(
                     fwd_out[f"dec_{level}"].reshape(-1, self.d_model), fwd_out[f"enc_{level}"].reshape(-1, self.d_model)
                 )
-            sparsity_e = sparsity_e + fwd_out[f"glyph_{level}"][..., -1].mean()
             stroke_topology = get_stroke_topology(
                 n_strokes=self.n_strokes,
                 n_connect=3 + level,
                 use_connector_stroke=level == fwd_out["n_levels"] - 2
             ).to(fwd_out["genre"].device)
-            topology_e = topology_e + contact_loss(
-                fwd_out[f"glyph_{level}"],
-                allowed_matrix=stroke_topology,
-                contact_threshold=self.renderer.width
+            topology_e = topology_e + self.contact_loss(
+                fwd_out[f"stroke_{level}"],
+                topology=stroke_topology,
             )
 
-
-
         recon_e = recon_e / float(fwd_out["n_levels"])
-        sparsity_e = sparsity_e / float(fwd_out["n_levels"])
         dec_e = dec_e / float(fwd_out["n_levels"] - 1)
         topology_e = topology_e / float(fwd_out["n_levels"])
         postit_e = torch.tensor(0., device=fwd_out["genre"].device)
@@ -348,14 +302,12 @@ class Inkler(pl.LightningModule):
             "genre_loss": genre_e,
             "postit_loss": postit_e,
             "recon_loss": recon_e,
-            "sparsity_loss": sparsity_e,
             "decoder_loss": dec_e,
             "topology_loss": topology_e,
             "total_loss": (
                     self.genre_w * genre_e
                     + self.postit_w * postit_e
                     + self.recon_w * recon_e
-                    + self.sparsity_w * sparsity_e
                     + self.decode_w * dec_e
                     + self.topology_w * topology_e
             )
@@ -415,7 +367,18 @@ class Inkler(pl.LightningModule):
         val_glyphs = {key: val for key, val in result_dict.items() if "glyph"
                       in key and int(key.split("_")[-1]) == self.n_hierarchy - 1}
         for glyph_level, glyph in val_glyphs.items():
-            rendered_glyph = self.renderer(glyph)
+            try:
+                level = int(glyph_level.replace("glyph_", ""))
+            except:
+                break
+            topology = get_stroke_topology(
+                n_strokes=self.n_strokes,
+                n_connect=3 + level,
+                use_connector_stroke=level == self.n_hierarchy - 1
+            )
+            # rendered_glyph = (self.renderer(glyph, topology) > .5).float()
+            pg = self.character(glyph, topology=topology, n_points=64)
+            rendered_glyph = (self.renderer(pg) > .5).float()
             for i_glyph, rg in enumerate(rendered_glyph):
                 save_name = f"{"_".join(batch["titles"][i_glyph].split(" "))}_BY_{
                     "_".join(batch["authors"][i_glyph].split(" "))}_epoch_{self.val_step}.png"

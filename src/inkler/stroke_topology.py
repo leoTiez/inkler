@@ -30,3 +30,9 @@ def get_stroke_topology(n_strokes: int = 16, n_connect: int = 4, use_connector_s
         topology_mat[:-n_independent, 0] = 1.
         topology_mat[0, :-n_independent] = 1.
     return topology_mat
+
+
+def parents(topology):  # topology: (S,S) bool -> parent index per stroke (-1 = root)
+    return [max([j for j in range(k) if topology[k][j]], default=-1) for k in range(len(topology))]
+
+

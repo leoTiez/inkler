@@ -168,6 +168,13 @@ def index_reduce_mps(
     return out, out_idx
 
 
+def scale_points(points: torch.Tensor) -> torch.Tensor:
+    flat = points.flatten(1, 2)
+    lo, hi = flat.amin(1), flat.amax(1)
+    half_extent = (hi - lo).amax(-1) / 2 + 1e-6
+    return (points - ((lo + hi) / 2)[:, None, None]) / half_extent[:, None, None, None]
+
+
 def get_git_revision_short_hash() -> str:
     return subprocess.check_output(['git', 'rev-parse', '--short', 'HEAD']).decode('ascii').strip()
 

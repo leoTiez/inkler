@@ -213,15 +213,17 @@ class Inkler(pl.LightningModule):
         glyph_decoder = {}
         stroke_points = {}
         for level, embedding in level_dict.items():
-            inkler_glyph[f"glyph_{level}"] = self.inkler_glyph(
-                embedding + self.sig * torch.randn_like(embedding)  # reparameterize
-            )
+            inkler_glyph[f"glyph_{level}"] = self.inkler_glyph(embedding)
             stroke_topology = get_stroke_topology(
                 n_strokes=self.n_strokes,
                 n_connect=3 + level,
                 use_connector_stroke=level == len(level_dict) - 2
             ).to(document_x.device)
-            stroke_points[f"stroke_{level}"] = self.character(inkler_glyph[f"glyph_{level}"], topology=stroke_topology)
+            stroke_points[f"stroke_{level}"] = self.character(
+                inkler_glyph[f"glyph_{level}"],
+                topology=stroke_topology,
+                add_noise=True
+            )
             glyph_decoder[f"recon_{level}"] = self.glyph_decoder(stroke_points[f"stroke_{level}"])
 
         decode_x = self.inkler_decoder(

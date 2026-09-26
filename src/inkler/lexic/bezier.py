@@ -1,6 +1,9 @@
 import torch
 import torch.nn.functional as F
 
+from inkler.lexic.abstract_glyph import AbstractGlyph
+from inkler.utils import scale_points
+
 
 PROPERTIES = {
     "x": 0,
@@ -61,19 +64,26 @@ class BezierInklerGlyph(torch.nn.Module):
         ], dim=-1)
 
 
-class BezierCharacterStrokes(torch.nn.Module):
-    def __init__(self, n_samples: int = 32, **kwargs):
+class BezierCharacterStrokes(AbstractGlyph):
+    def __init__(self, n_samples: int = 32, margin: float= .05, noise: float = .02, **kwargs):
         super().__init__()
         self.n_samples = n_samples
+        self.margin = margin
         self.register_buffer("t", torch.linspace(0, 1, self.n_samples))
+        self.noise = noise
 
-    def forward(self, theta: torch.Tensor, n_points: int | None = None, **kwargs):
+    def forward(self, theta: torch.Tensor, add_noise: bool = False, n_points: int | None = None, **kwargs):
+        scale = theta[..., PROPERTIES["length"]]
         P0, P1, P2 = bezier_control_points(theta)
         if n_points is None:
             t = self.t
         else:
             t = torch.linspace(0., 1., n_points).to(theta.device)
-        return quadratic_bezier(P0, P1, P2, t)
+        points = quadratic_bezier(P0, P1, P2, t)
+        if add_noise:
+            points = self._add_noise(points, scale, n_points=len(t))
+        spoints = scale_points(points)
+        return spoints * (1 - self.margin)
 
 
 def bezier_control_points(theta: torch.Tensor):

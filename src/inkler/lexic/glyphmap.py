@@ -1,7 +1,10 @@
 import torch
 from math import pi
 from torch.distributions.utils import probs_to_logits
+
+from inkler.lexic.abstract_glyph import AbstractGlyph
 from inkler.stroke_topology import parents
+from inkler.utils import scale_points
 
 LEXIC = {
     "circle": 0,
@@ -64,20 +67,29 @@ class LexicInklerGlyph(torch.nn.Module):
         ], dim=-1)
 
 
-class LexicCharacterStrokes(torch.nn.Module):
+class LexicCharacterStrokes(AbstractGlyph):
     def __init__(
             self,
             num_points: int = 32,
             margin: float = 0.05,
             min_scale: float = .1,
+            noise: float = .02,
             **kwargs
     ):
         super().__init__()
         self.num_points = num_points
         self.margin = margin
         self.min_scale = min_scale
+        self.noise = noise
 
-    def forward(self, theta: torch.Tensor, topology: torch.Tensor, n_points: int | None = None ,**kwargs):
+    def forward(
+            self,
+            theta: torch.Tensor,
+            topology: torch.Tensor,
+            add_noise: bool = False,
+            n_points: int | None = None ,
+            **kwargs
+    ):
         """parent_pos=parent_x, child_pos=child_x (B,S). Returns canvas-fitted points (B,S,N,2) in [-1,1]."""
         if n_points is None:
             n_points = self.num_points
@@ -90,6 +102,9 @@ class LexicCharacterStrokes(torch.nn.Module):
         rotation = properties[..., PROPERTIES["rotation"]]
         parent_idx = parents(topology)
         local_curves, strokes = shapes(primitive_probs, scale, rotation, n_points), []
+        if add_noise:
+            local_curves = self._add_noise(local_curves, scale, n_points=n_points)
+
         for k, parent in enumerate(parent_idx):
             stroke = local_curves[:, k]
             if parent >= 0:
@@ -98,10 +113,8 @@ class LexicCharacterStrokes(torch.nn.Module):
                 stroke = stroke + (interp(strokes[parent], parent_pos[:, k]) - interp(stroke, child_pos[:, k]))[:, None]
             strokes.append(stroke)
         points = torch.stack(strokes, 1)
-        flat = points.flatten(1, 2)
-        lo, hi = flat.amin(1), flat.amax(1)
-        half_extent = (hi - lo).amax(-1) / 2 + 1e-6
-        return (points - ((lo + hi) / 2)[:, None, None]) / half_extent[:, None, None, None] * (1 - self.margin)
+        spoints = scale_points(points)
+        return spoints * (1 - self.margin)
 
 
 def hook_profile(num_points, device=None):

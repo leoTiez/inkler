@@ -17,6 +17,7 @@ from inkler.renderer import GlyphRenderer
 
 from inkler.lexic.glyphmap import LexicCharacterStrokes, LexicInklerGlyph, lexic_contact_loss
 from inkler.lexic.bezier import BezierCharacterStrokes, BezierInklerGlyph, bezier_contact_loss
+from inkler.lexic.ode_glyph import ODECharacterStrokes, ODEInklerGlyph, ode_contact_loss
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ class Inkler(pl.LightningModule):
             sparsity_weight: float = 0.05,
             sig_weight: float = 0.2,
             n_eval_points: int = 32,
+            consistent_hierarchy: bool = False,
             betas: Tuple[float, float] = (.9, 0.999),
             optim_params: Dict = {},
             scheduler_params: Dict | None = None,
@@ -79,6 +81,7 @@ class Inkler(pl.LightningModule):
             raise ValueError("n_hierarchy must be larger than 0")
         self.n_hierarchy = n_hierarchy
         self.n_strokes = n_strokes
+        self.consistent_hierarchy = consistent_hierarchy
         self.register_buffer("doc_token", torch.ones((1, 1, self.d_model)) * doc_token_fill)
         self.inkler_embedder = sdp.StructuralDocumentProcessor(
             d_model=self.d_model,
@@ -133,8 +136,12 @@ class Inkler(pl.LightningModule):
             self.inkler_glyph = BezierInklerGlyph(d_model=self.d_model, n_strokes=self.n_strokes)
             self.contact_loss = bezier_contact_loss
             self.character = BezierCharacterStrokes(**character_dict)
+        elif glyph_type.lower() == "ode":
+            self.inkler_glyph = ODEInklerGlyph(d_model=self.d_model, n_strokes=self.n_strokes)
+            self.contact_loss = ode_contact_loss
+            self.character = ODECharacterStrokes(**character_dict)
         else:
-            raise ValueError("Glyph type not supported. Select between lexic and bezier")
+            raise ValueError("Glyph type not supported. Select between lexic, bezier, and ode")
 
         self.lr = lr
         self.optim_dict = optim_params
@@ -216,8 +223,8 @@ class Inkler(pl.LightningModule):
             inkler_glyph[f"glyph_{level}"] = self.inkler_glyph(embedding)
             stroke_topology = get_stroke_topology(
                 n_strokes=self.n_strokes,
-                n_connect=3 + level,
-                use_connector_stroke=level == len(level_dict) - 2
+                n_connect=3 + level if not self.consistent_hierarchy else 3,
+                use_connector_stroke=level == len(level_dict) - 2 if not self.consistent_hierarchy else True,
             ).to(document_x.device)
             stroke_points[f"stroke_{level}"] = self.character(
                 inkler_glyph[f"glyph_{level}"],
@@ -275,8 +282,8 @@ class Inkler(pl.LightningModule):
                 )
             stroke_topology = get_stroke_topology(
                 n_strokes=self.n_strokes,
-                n_connect=3 + level,
-                use_connector_stroke=level == fwd_out["n_levels"] - 2
+                n_connect=3 + level if not self.consistent_hierarchy else 3,
+                use_connector_stroke=level == fwd_out["n_levels"] - 2 if not self.consistent_hierarchy else True,
             ).to(fwd_out["genre"].device)
             topology_e = topology_e + self.contact_loss(
                 fwd_out[f"stroke_{level}"],
@@ -375,8 +382,8 @@ class Inkler(pl.LightningModule):
                 break
             topology = get_stroke_topology(
                 n_strokes=self.n_strokes,
-                n_connect=3 + level,
-                use_connector_stroke=level == self.n_hierarchy - 1
+                n_connect=3 + level if not self.consistent_hierarchy else 3,
+                use_connector_stroke=level == self.n_hierarchy - 1 if not self.consistent_hierarchy else True,
             )
             # rendered_glyph = (self.renderer(glyph, topology) > .5).float()
             pg = self.character(glyph, topology=topology, n_points=64)

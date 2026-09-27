@@ -73,14 +73,17 @@ class LexicCharacterStrokes(AbstractGlyph):
             num_points: int = 32,
             margin: float = 0.05,
             min_scale: float = .1,
-            noise: float = .02,
+            noise: float = .05,
+            n_noise_knots: int = 6,
             **kwargs
     ):
-        super().__init__()
+        super().__init__(
+            margin=margin,
+            noise=noise,
+            n_noise_knots=n_noise_knots
+        )
         self.num_points = num_points
-        self.margin = margin
         self.min_scale = min_scale
-        self.noise = noise
 
     def forward(
             self,
@@ -102,9 +105,6 @@ class LexicCharacterStrokes(AbstractGlyph):
         rotation = properties[..., PROPERTIES["rotation"]]
         parent_idx = parents(topology)
         local_curves, strokes = shapes(primitive_probs, scale, rotation, n_points), []
-        if add_noise:
-            local_curves = self._add_noise(local_curves, scale, n_points=n_points)
-
         for k, parent in enumerate(parent_idx):
             stroke = local_curves[:, k]
             if parent >= 0:
@@ -114,6 +114,9 @@ class LexicCharacterStrokes(AbstractGlyph):
             strokes.append(stroke)
         points = torch.stack(strokes, 1)
         spoints = scale_points(points)
+        if add_noise:
+            spoints = self._add_noise(spoints, n_points=n_points)
+        spoints = scale_points(spoints)
         return spoints * (1 - self.margin)
 
 

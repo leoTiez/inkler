@@ -65,24 +65,33 @@ class BezierInklerGlyph(torch.nn.Module):
 
 
 class BezierCharacterStrokes(AbstractGlyph):
-    def __init__(self, n_samples: int = 32, margin: float= .05, noise: float = .02, **kwargs):
-        super().__init__()
+    def __init__(
+            self,
+            n_samples: int = 32,
+            margin: float= .05,
+            noise: float = .05,
+            n_noise_knots: int = 6,
+            **kwargs
+    ):
+        super().__init__(
+            margin=margin,
+            noise=noise,
+            n_noise_knots=n_noise_knots
+        )
         self.n_samples = n_samples
-        self.margin = margin
         self.register_buffer("t", torch.linspace(0, 1, self.n_samples))
-        self.noise = noise
 
     def forward(self, theta: torch.Tensor, add_noise: bool = False, n_points: int | None = None, **kwargs):
-        scale = theta[..., PROPERTIES["length"]]
         P0, P1, P2 = bezier_control_points(theta)
         if n_points is None:
             t = self.t
         else:
             t = torch.linspace(0., 1., n_points).to(theta.device)
         points = quadratic_bezier(P0, P1, P2, t)
-        if add_noise:
-            points = self._add_noise(points, scale, n_points=len(t))
         spoints = scale_points(points)
+        if add_noise:
+            spoints = self._add_noise(spoints, n_points=len(t))
+        spoints = scale_points(spoints)
         return spoints * (1 - self.margin)
 
 

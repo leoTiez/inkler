@@ -40,6 +40,11 @@ def parse_args(args):
         help="Enable torch.autograd.set_detect_anomaly for debugging NaN/Inf grads. "
              "Adds significant backward-pass overhead, so keep off for normal training runs."
     )
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        help="Path to model checkpoint"
+    )
 
     return parser.parse_args(args)
 
@@ -53,6 +58,7 @@ def main(args):
         handlers=[cnsl]
     )
 
+    model_path = args.model_path
     train_path = args.yaml_path
     if not os.path.isfile(train_path):
         raise FileNotFoundError("Training yaml file not found")
@@ -112,13 +118,31 @@ def main(args):
     )
     logger.info(f"Loaded training set with {dataloader.n_books} entries")
 
-    model = Inkler(
-        lr=train_dict["train"]["lr"],
-        optim_params=train_dict["train"].get("optim_params", None),
-        scheduler_params=train_dict["train"].get("scheduler_params", None),
-        warmup_params=train_dict["train"].get("warmup_params", None),
-        **train_dict["model"]
-    )
+    if model_path is None:
+        model = Inkler(
+            lr=train_dict["train"]["lr"],
+            optim_params=train_dict["train"].get("optim_params", None),
+            scheduler_params=train_dict["train"].get("scheduler_params", None),
+            warmup_params=train_dict["train"].get("warmup_params", None),
+            **train_dict["model"]
+        )
+        logger.info(f"Created new Inkler")
+    else:
+        try:
+            n_pretrained_epochs = int(model_path.split("-")[1].replace("epoch=", ""))
+        except ValueError:
+            n_pretrained_epochs = 0
+        train_dict["train"]["max_epochs"] = train_dict["train"]["max_epochs"] - n_pretrained_epochs
+        model = Inkler.load_from_checkpoint(
+            model_path,
+            lr=train_dict["train"]["lr"],
+            optim_params=train_dict["train"].get("optim_params", None),
+            scheduler_params=train_dict["train"].get("scheduler_params", None),
+            warmup_params=train_dict["train"].get("warmup_params", None),
+            **train_dict["model"]
+        ).train()
+        logger.info(f"Loaded Inkler from checkpoint at path {model_path}")
+
 
     for param in ["lr", "optim_params", "scheduler_params", "warmup_params"]:
         if param in train_dict["train"]:

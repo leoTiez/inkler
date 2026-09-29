@@ -18,6 +18,7 @@ from inkler.renderer import GlyphRenderer
 from inkler.lexic.glyphmap import LexicCharacterStrokes, LexicInklerGlyph, lexic_contact_loss
 from inkler.lexic.bezier import BezierCharacterStrokes, BezierInklerGlyph, bezier_contact_loss
 from inkler.lexic.ode_glyph import ODECharacterStrokes, ODEInklerGlyph, ode_contact_loss
+from inkler.lexic.woodlouse import WoodlouseCharacterStrokes, WoodlouseInklerGlyph, woodlouse_contact_loss
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,10 @@ class Inkler(pl.LightningModule):
             self.inkler_glyph = ODEInklerGlyph(d_model=self.d_model, n_strokes=self.n_strokes)
             self.contact_loss = ode_contact_loss
             self.character = ODECharacterStrokes(**character_dict)
+        elif glyph_type.lower() == "woodlouse":
+            self.inkler_glyph = WoodlouseInklerGlyph(d_model=self.d_model, n_strokes=self.n_strokes)
+            self.contact_loss = woodlouse_contact_loss
+            self.character = WoodlouseCharacterStrokes(**character_dict)
         else:
             raise ValueError("Glyph type not supported. Select between lexic, bezier, and ode")
 

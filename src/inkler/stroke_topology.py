@@ -28,24 +28,25 @@ def keep_first_true_per_row(matrix: torch.Tensor) -> torch.Tensor:
 
     return result
 
-@torch.no_grad()
-def get_stroke_topology(n_strokes: int = 16, n_connect: int = 4, use_connector_stroke: bool = False):
-    if n_connect < 2:
-        raise ValueError('n_connect must be at least 2')
-    n_independent = n_connect - 1
-    if use_connector_stroke:
-        block_mat = create_block_matrix(n_strokes - n_independent, 2)
-    else:
-        block_mat = create_block_matrix(n_strokes - n_independent, n_connect)
 
-    no_block = torch.where(~block_mat.any(dim=1))[0]
-    block_mat[no_block, torch.maximum(no_block - 1, torch.tensor(0))] = 1
-    topology_mat = torch.eye(n_strokes, dtype=torch.int)
-    topology_mat[:-n_independent, :-n_independent] = block_mat
-    if use_connector_stroke:
-        n_connect = n_strokes // 4 + 1
-        topology_mat[:n_connect, 0] = 1.
-        topology_mat[0, :n_connect] = 1.
+@torch.no_grad()
+def get_stroke_topology(n_strokes: int = 16, n_block: int = 0, use_connector_stroke: bool = False, n_connect: int = 5) -> torch.Tensor:
+    if n_block < 2:
+        topology_mat = torch.triu(torch.ones_like(torch.eye(n_strokes, dtype=torch.int)), diagonal=-n_connect)
+    else:
+        n_independent = n_block - 1
+        if use_connector_stroke:
+            block_mat = create_block_matrix(n_strokes - n_independent, 2)
+        else:
+            block_mat = create_block_matrix(n_strokes - n_independent, n_block)
+
+        no_block = torch.where(~block_mat.any(dim=1))[0]
+        block_mat[no_block, torch.maximum(no_block - 1, torch.tensor(0))] = 1
+        topology_mat = torch.eye(n_strokes, dtype=torch.int)
+        topology_mat[:-n_independent, :-n_independent] = block_mat
+        if use_connector_stroke:
+            topology_mat[:n_connect, 0] = 1.
+            topology_mat[0, :n_connect] = 1.
 
     topology_mat = keep_first_true_per_row(topology_mat)
     return topology_mat

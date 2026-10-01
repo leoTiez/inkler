@@ -19,17 +19,30 @@ PROPERTIES = {
     "rotation": 3,
 }
 
+# HOOK = torch.tensor([
+#     [-0.75, -0.75],
+#     [ 0.45, -0.75],
+#     [ 0.75, -0.60],
+#     [ 0.75,  0.05],
+#     [ 0.72,  0.40],
+#     [ 0.52,  0.68],
+#     [ 0.20,  0.82],
+#     [-0.15,  0.80],
+#     [-0.45,  0.62],
+#     [-0.62,  0.38],
+# ], dtype=torch.float32)
+
 HOOK = torch.tensor([
-    [-0.75, -0.75],
-    [ 0.45, -0.75],
-    [ 0.75, -0.60],
-    [ 0.75,  0.05],
-    [ 0.72,  0.40],
-    [ 0.52,  0.68],
-    [ 0.20,  0.82],
-    [-0.15,  0.80],
-    [-0.45,  0.62],
-    [-0.62,  0.38],
+    [-0.75, -0.22],
+    [-0.63, -0.06],
+    [-0.48,  0.07],
+    [-0.30,  0.16],
+    [-0.10,  0.21],
+    [ 0.10,  0.21],
+    [ 0.30,  0.16],
+    [ 0.48,  0.07],
+    [ 0.63, -0.06],
+    [ 0.75, -0.22],
 ], dtype=torch.float32)
 
 
@@ -55,8 +68,8 @@ class LexicInklerGlyph(torch.nn.Module):
         y = torch.tanh(properties[..., PROPERTIES["y"]]).unsqueeze(-1)
         # Angle
         rotation = torch.tanh(properties[..., PROPERTIES["rotation"]]).unsqueeze(-1)
-        # scale --> scales below 0 are ignored
-        scale = torch.tanh(properties[..., PROPERTIES["scale"]]).unsqueeze(-1)
+        # scale
+        scale = torch.sigmoid(properties[..., PROPERTIES["scale"]]).unsqueeze(-1)
 
         return torch.cat([
             clh,
@@ -72,7 +85,7 @@ class LexicCharacterStrokes(AbstractGlyph):
             self,
             num_points: int = 32,
             margin: float = 0.05,
-            min_scale: float = .1,
+            min_scale: float = .0,
             noise: float = .05,
             n_noise_knots: int = 6,
             **kwargs
@@ -113,6 +126,16 @@ class LexicCharacterStrokes(AbstractGlyph):
                 stroke = stroke + (interp(strokes[parent], parent_pos[:, k]) - interp(stroke, child_pos[:, k]))[:, None]
             strokes.append(stroke)
         points = torch.stack(strokes, 1)
+        missing_strokes = local_curves.shape[1] - topology.shape[0]
+        points = torch.hstack([
+            points,
+            torch.zeros(
+                (points.shape[0], missing_strokes, *points.shape[2:]),
+                dtype=points.dtype,
+                device=points.device
+            )],
+            dim=1
+        )
         spoints = scale_points(points)
         if add_noise:
             spoints = self._add_noise(spoints, n_points=n_points)

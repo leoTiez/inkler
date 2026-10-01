@@ -45,8 +45,8 @@ class WoodlouseInklerGlyph(torch.nn.Module):
         y = torch.tanh(properties[..., PROPERTIES["y"]]).unsqueeze(-1)
         # Angle
         rotation = torch.tanh(properties[..., PROPERTIES["rotation"]]).unsqueeze(-1)
-        # scale --> scales below 0 are ignored
-        scale = torch.tanh(properties[..., PROPERTIES["scale"]]).unsqueeze(-1)
+        # scale
+        scale = torch.sigmoid(properties[..., PROPERTIES["scale"]]).unsqueeze(-1)
 
         return torch.cat([
             direct,
@@ -62,7 +62,7 @@ class WoodlouseCharacterStrokes(AbstractGlyph):
             self,
             num_points: int = 32,
             margin: float = 0.05,
-            min_scale: float = .1,
+            min_scale: float = .0,
             noise: float = .05,
             n_noise_knots: int = 6,
             smooth: int = 11,
@@ -145,6 +145,15 @@ class WoodlouseCharacterStrokes(AbstractGlyph):
                 stroke = stroke + (interp(strokes[parent], parent_pos[:, k]) - interp(stroke, child_pos[:, k]))[:, None]
             strokes.append(stroke)
         points = torch.stack(strokes, 1)
+        missing_strokes = local_curves.shape[1] - topology.shape[0]
+        points = torch.hstack([
+            points,
+            torch.zeros(
+                (points.shape[0], missing_strokes, *points.shape[2:]),
+                dtype=points.dtype,
+                device=points.device
+            )],
+        )
         spoints = scale_points(points)
         if add_noise:
             spoints = self._add_noise(spoints, n_points=n_points)

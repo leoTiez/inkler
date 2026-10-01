@@ -11,6 +11,14 @@ In the latent space, different glyph modules can be applied to generate symbols.
 The reconstructed vector is then demultiplexed back to the original structure. The aim is to recover the lower hierarchy vector sequence based on the pooled single higher hierarchy vector. 
 All together, it is a multi-loss objective that aims to represent as much contextual information about a book as possible in a human readable glyph.
 
+<p align="center">
+  <a href="https://<user>.github.io/<repo>/">
+    <img src="animations/inkler.svg" width="640" alt="Inkler: hierarchical pooling, glyph generation and demultiplexing">
+  </a>
+  <br>
+  <sub>Click for the interactive version with pause and scrubbing.</sub>
+</p>
+
 ## Installation
 Install the `Inkler` by running
 ```commandline

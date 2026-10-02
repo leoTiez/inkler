@@ -134,7 +134,6 @@ class LexicCharacterStrokes(AbstractGlyph):
                 dtype=points.dtype,
                 device=points.device
             )],
-            dim=1
         )
         spoints = scale_points(points)
         if add_noise:

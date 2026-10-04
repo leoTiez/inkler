@@ -133,7 +133,6 @@ def main(args):
             n_pretrained_epochs = int(model_path.split("-")[1].replace("epoch=", ""))
         except ValueError:
             n_pretrained_epochs = 0
-        train_dict["train"]["max_epochs"] = train_dict["train"]["max_epochs"] - n_pretrained_epochs
         model = Inkler.load_from_checkpoint(
             model_path,
             lr=train_dict["train"]["lr"],

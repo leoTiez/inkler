@@ -118,6 +118,7 @@ def main(args):
     )
     logger.info(f"Loaded training set with {dataloader.n_books} entries")
 
+    n_pretrained_epochs = 0
     if model_path is None:
         model = Inkler(
             lr=train_dict["train"]["lr"],
@@ -163,9 +164,9 @@ def main(args):
         callbacks=[
             LearningRateMonitor(logging_interval="step"),
             checkpoint_callback
-        ]
+        ],
     )
-
+    trainer.fit_loop.epoch_progress.current.processed = n_pretrained_epochs
     trainer.fit(model=model, train_dataloaders=dataloader, val_dataloaders=val_dataloader)
 
 

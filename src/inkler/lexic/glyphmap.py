@@ -57,11 +57,12 @@ class LexicInklerGlyph(torch.nn.Module):
             torch.nn.GELU(),
             torch.nn.Linear(256, self.n_strokes * (len(LEXIC) + len(PROPERTIES)))
         )
+        self.temperature = 1.0
 
     def forward(self, z):
         theta = self.net(z).view(-1, self.n_strokes, (len(LEXIC) + len(PROPERTIES)))
         # circle line hook activation
-        clh = theta[..., :len(LEXIC)].softmax(dim=-1)
+        clh = (theta[..., :len(LEXIC)] / self.temperature).softmax(dim=-1)
         properties = theta[..., len(LEXIC):]
         # position
         x = torch.tanh(properties[..., PROPERTIES["x"]]).unsqueeze(-1)
@@ -86,8 +87,9 @@ class LexicCharacterStrokes(AbstractGlyph):
             num_points: int = 32,
             margin: float = 0.05,
             min_scale: float = .0,
-            noise: float = .05,
+            noise: float = .02,
             n_noise_knots: int = 6,
+            snap: float = -.0,
             **kwargs
     ):
         super().__init__(
@@ -97,6 +99,7 @@ class LexicCharacterStrokes(AbstractGlyph):
         )
         self.num_points = num_points
         self.min_scale = min_scale
+        self.snap = snap
 
     def forward(
             self,
@@ -117,7 +120,7 @@ class LexicCharacterStrokes(AbstractGlyph):
         scale = scale.masked_fill(scale < self.min_scale, 0.)
         rotation = properties[..., PROPERTIES["rotation"]]
         parent_idx = parents(topology)
-        local_curves, strokes = shapes(primitive_probs, scale, rotation, n_points), []
+        local_curves, strokes = shapes(primitive_probs, scale, rotation, n_points, snap=self.snap), []
         for k, parent in enumerate(parent_idx):
             stroke = local_curves[:, k]
             if parent >= 0:
@@ -152,10 +155,11 @@ def hook_profile(num_points, device=None):
     return angle[torch.searchsorted(arc, mid).clamp(max=len(angle) - 1)], arc[-1]
 
 
-def shapes(primitive_probs, scale, rotation, num_points=64):
+def shapes(primitive_probs, scale, rotation, num_points=64, snap: float =0.0):
     """primitive_probs (B,S,3) [circle,line,hook], scale, rotation (B,S) -> local curves (B,S,N,2).
     Each primitive = heading profile + arc length; blending them is exact for one-hot probs."""
-    primitive_probs = torch.nn.functional.gumbel_softmax(probs_to_logits(primitive_probs), hard=True)
+    hard = torch.nn.functional.one_hot(primitive_probs.argmax(-1), primitive_probs.shape[-1]).to(primitive_probs.dtype)
+    primitive_probs = primitive_probs + snap * (hard - primitive_probs).detach()
     u = torch.linspace(-1, 1, num_points, device=primitive_probs.device)
     u_mid = (u[1:] + u[:-1]) / 2
     hook_heading, hook_length = hook_profile(num_points, u.device)

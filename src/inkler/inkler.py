@@ -2,6 +2,7 @@ import logging
 from typing import Callable, Tuple, Dict
 from pathlib import Path
 import os
+import math
 
 import torch
 from pytorch_lightning.utilities.types import OptimizerLRScheduler
@@ -51,6 +52,7 @@ class Inkler(pl.LightningModule):
             genre_weight: float = .1,
             sparsity_weight: float = 0.05,
             sig_weight: float = 0.2,
+            annealing: float = .001,
             n_eval_points: int = 32,
             consistent_hierarchy: bool = False,
             betas: Tuple[float, float] = (.9, 0.999),
@@ -161,11 +163,13 @@ class Inkler(pl.LightningModule):
         self.decode_w = decode_weight
         self.topology_w = topology_weight
         self.sig = sig_weight
+        self.annealing = annealing
         self.class_loss = torch.nn.BCELoss(reduction="mean")
         self.recon_loss = torch.nn.MSELoss(reduction="mean")
         self.dec_loss = torch.nn.MSELoss(reduction="mean")
         self.glyph_log_dir = None
         self.val_step = -1
+        self.train_step = -1
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
         logger.info(f"Use RAdam optimizer with lr {self.lr} and betas {self.betas}")
@@ -333,7 +337,7 @@ class Inkler(pl.LightningModule):
             self,
             batch: Dict,
     ):
-
+        self.train_step += 1
         result_dict = self(
             x_sentence=batch["texts"],
             hierarchy=batch["hierarchy"],
@@ -349,6 +353,8 @@ class Inkler(pl.LightningModule):
         )
         utils.log_mps_memory("After loss calculation", device=self.device.type)
 
+        if hasattr(self.inkler_glyph, "temperature"):
+            self.inkler_glyph.temperature = math.exp(-self.train_step * self.annealing)
         self.log(name="train_loss", value=loss_dict["total_loss"], on_step=True, on_epoch=False, prog_bar=True)
         for loss_name, loss_val in loss_dict.items():
             if loss_name != "total_loss":
@@ -358,6 +364,7 @@ class Inkler(pl.LightningModule):
             torch.mps.synchronize()
             torch.mps.empty_cache()
             utils.log_mps_memory("After emptying MPS cache", device=self.device.type)
+
         return loss_dict["total_loss"]
 
     @torch.no_grad()

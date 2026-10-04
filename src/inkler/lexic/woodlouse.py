@@ -1,6 +1,7 @@
 import torch
 from math import pi
 from torch.distributions.utils import probs_to_logits
+import torch.nn.functional as F
 
 from inkler.lexic.abstract_glyph import AbstractGlyph
 from inkler.stroke_topology import parents
@@ -16,7 +17,6 @@ PROPERTIES = {
     "x": 0,
     "y": 1,
     "scale": 2,
-    "rotation": 3,
 }
 
 
@@ -31,20 +31,19 @@ class WoodlouseInklerGlyph(torch.nn.Module):
             torch.nn.GELU(),
             torch.nn.Linear(256, self.n_strokes * (len(DIRECTION) * 4 + len(PROPERTIES)))
         )
+        self.temperature = 1.
 
     def forward(self, z):
         theta = self.net(z).view(-1, self.n_strokes, (len(DIRECTION) * 4 + len(PROPERTIES)))
         # circle line hook activation
         n_theta = theta.shape[0]
-        direct = theta[..., :len(DIRECTION) * 4].reshape(
+        direct = (theta[..., :len(DIRECTION) * 4].reshape(
             n_theta, self.n_strokes, -1, len(DIRECTION)
-        ).softmax(dim=-1).reshape(-1, self.n_strokes, len(DIRECTION) * 4)
+        ) / self.temperature).softmax(dim=-1).reshape(-1, self.n_strokes, len(DIRECTION) * 4)
         properties = theta[..., -len(PROPERTIES):]
         # position
         x = torch.tanh(properties[..., PROPERTIES["x"]]).unsqueeze(-1)
         y = torch.tanh(properties[..., PROPERTIES["y"]]).unsqueeze(-1)
-        # Angle
-        rotation = torch.tanh(properties[..., PROPERTIES["rotation"]]).unsqueeze(-1)
         # scale
         scale = torch.sigmoid(properties[..., PROPERTIES["scale"]]).unsqueeze(-1)
 
@@ -53,7 +52,6 @@ class WoodlouseInklerGlyph(torch.nn.Module):
             x,
             y,
             scale,
-            rotation
         ], dim=-1)
 
 
@@ -63,7 +61,7 @@ class WoodlouseCharacterStrokes(AbstractGlyph):
             num_points: int = 32,
             margin: float = 0.05,
             min_scale: float = .0,
-            noise: float = .05,
+            noise: float = .02,
             n_noise_knots: int = 6,
             smooth: int = 11,
             **kwargs
@@ -77,41 +75,29 @@ class WoodlouseCharacterStrokes(AbstractGlyph):
         self.min_scale = min_scale
         self.register_buffer("smooth", torch.ones(smooth) / float(smooth))
         self.register_buffer("direction_vector", torch.tensor([-1, 0, 1]))
+        # self.register_buffer("turn",
+        #                      torch.stack([torch.eye(4).roll(d, 1) for d in (-1, 0, 1)]))  # left, straight, right
+        # self.register_buffer("unit", torch.tensor([[1., 0.], [0., -1.], [-1., 0.], [0., 1.]]))  # same order as t_direct
 
     def _smooth(self, points: torch.Tensor) -> torch.Tensor:
         x_ = torch.nn.functional.pad(
             points,
             (0, 0, self.smooth.shape[0] // 2, self.smooth.shape[0] // 2),
-            mode="constant",
+            mode="replicate",
         )
         x_ = x_.unfold(dimension=-2, size=self.smooth.shape[0], step=1)
         x_ = x_ @ self.smooth.reshape(1, 1, 1, self.smooth.shape[0], 1)
         return x_.squeeze(-1)
 
-    def draw_line(self, directions: torch.Tensor, scale: torch.Tensor, rotation: torch.Tensor, n_points: int):
+    def draw_line(self, directions: torch.Tensor, scale: torch.Tensor, n_points: int):
         bs, n_strokes = directions.shape[:2]
-        t = torch.linspace(0., 1., n_points // 4, device=directions.device)
-        t_direct = torch.stack([
-            torch.vstack([t, torch.zeros_like(t)]).T,  # along x
-            torch.vstack([torch.zeros_like(t), -t]).T,  # along -y
-            torch.vstack([-t, torch.zeros_like(t)]).T,  # along -x
-            torch.vstack([torch.zeros_like(t), t]).T,   # along y
-        ])
-        direction_primitives = torch.nn.functional.gumbel_softmax(probs_to_logits(directions), hard=True)
-        cum_direct = ((
-                             self.direction_vector.reshape(1, 1, 1, -1)
-                             * direction_primitives
-                     ).sum(-1).cumsum(-2) % 4).int()
-        line_primitives = t_direct[cum_direct.flatten()].reshape(
+        t = torch.full((n_points // 4,), 4. / n_points, device=directions.device)
+
+        cum_direct = (self.direction_vector.reshape(1, 1, 1, -1) * directions).sum(-1).cumsum(-2) * pi
+        line_primitives = (torch.stack([cum_direct.cos(), -cum_direct.sin()], -1)[..., None, :] * t[:, None]).reshape(
             bs, n_strokes, n_points, 2
         ).cumsum(-2) * scale[..., None, None]
-        cos_rot, sin_rot = (pi * rotation).cos(), (pi * rotation).sin()
-        rot_mat = torch.stack([
-            torch.stack([cos_rot, -sin_rot], dim=-1),
-            torch.stack([sin_rot, cos_rot], dim=-1),
-        ], dim=-2)
-        line_primitives = line_primitives - line_primitives.mean(-2, keepdim=True)
-        steps = (rot_mat.unsqueeze(2) @ line_primitives.unsqueeze(-1)).squeeze(-1)
+        steps = line_primitives - line_primitives.mean(-2, keepdim=True)
         steps = self._smooth(steps)
         return steps
 
@@ -133,9 +119,8 @@ class WoodlouseCharacterStrokes(AbstractGlyph):
         child_pos = properties[..., PROPERTIES["y"]]
         scale = properties[..., PROPERTIES["scale"]]
         scale = scale.masked_fill(scale < self.min_scale, 0.)
-        rotation = properties[..., PROPERTIES["rotation"]]
 
-        local_curves, strokes = self.draw_line(direct, n_points=n_points, scale=scale, rotation=rotation), []
+        local_curves, strokes = self.draw_line(direct, n_points=n_points, scale=scale), []
         parent_idx = parents(topology)
         for k, parent in enumerate(parent_idx):
             stroke = local_curves[:, k]

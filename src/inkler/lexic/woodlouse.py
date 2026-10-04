@@ -61,7 +61,7 @@ class WoodlouseCharacterStrokes(AbstractGlyph):
             num_points: int = 32,
             margin: float = 0.05,
             min_scale: float = .0,
-            noise: float = .02,
+            noise: float = .05,
             n_noise_knots: int = 6,
             smooth: int = 11,
             **kwargs

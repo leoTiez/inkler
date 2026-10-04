@@ -62,7 +62,7 @@ class LexicInklerGlyph(torch.nn.Module):
     def forward(self, z):
         theta = self.net(z).view(-1, self.n_strokes, (len(LEXIC) + len(PROPERTIES)))
         # circle line hook activation
-        clh = (theta[..., :len(LEXIC)] / self.temperature).softmax(dim=-1)
+        clh = (theta[..., :len(LEXIC)] + self.temperature * torch.randn_like(theta[..., :len(LEXIC)])).softmax(dim=-1)
         properties = theta[..., len(LEXIC):]
         # position
         x = torch.tanh(properties[..., PROPERTIES["x"]]).unsqueeze(-1)
@@ -89,7 +89,7 @@ class LexicCharacterStrokes(AbstractGlyph):
             min_scale: float = .0,
             noise: float = .05,
             n_noise_knots: int = 6,
-            snap: float = -.0,
+            snap: float = 1.,
             **kwargs
     ):
         super().__init__(

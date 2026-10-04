@@ -17,6 +17,7 @@ PROPERTIES = {
     "x": 0,
     "y": 1,
     "scale": 2,
+    "rotation": 3
 }
 
 
@@ -37,21 +38,27 @@ class WoodlouseInklerGlyph(torch.nn.Module):
         theta = self.net(z).view(-1, self.n_strokes, (len(DIRECTION) * 4 + len(PROPERTIES)))
         # circle line hook activation
         n_theta = theta.shape[0]
-        direct = (theta[..., :len(DIRECTION) * 4].reshape(
+        direct = (
+                theta[..., :len(DIRECTION) * 4]
+                + self.temperature * torch.randn_like(theta[..., :len(DIRECTION) * 4])
+        ).reshape(
             n_theta, self.n_strokes, -1, len(DIRECTION)
-        ) / self.temperature).softmax(dim=-1).reshape(-1, self.n_strokes, len(DIRECTION) * 4)
+        ).softmax(dim=-1).reshape(-1, self.n_strokes, len(DIRECTION) * 4)
         properties = theta[..., -len(PROPERTIES):]
         # position
         x = torch.tanh(properties[..., PROPERTIES["x"]]).unsqueeze(-1)
         y = torch.tanh(properties[..., PROPERTIES["y"]]).unsqueeze(-1)
         # scale
         scale = torch.sigmoid(properties[..., PROPERTIES["scale"]]).unsqueeze(-1)
+        # rotation
+        rotation = torch.tanh(properties[..., PROPERTIES["rotation"]]).unsqueeze(-1)
 
         return torch.cat([
             direct,
             x,
             y,
             scale,
+            rotation,
         ], dim=-1)
 
 
@@ -64,6 +71,7 @@ class WoodlouseCharacterStrokes(AbstractGlyph):
             noise: float = .05,
             n_noise_knots: int = 6,
             smooth: int = 11,
+            snap: float = 1.,
             **kwargs
     ):
         super().__init__(
@@ -75,9 +83,7 @@ class WoodlouseCharacterStrokes(AbstractGlyph):
         self.min_scale = min_scale
         self.register_buffer("smooth", torch.ones(smooth) / float(smooth))
         self.register_buffer("direction_vector", torch.tensor([-1, 0, 1]))
-        # self.register_buffer("turn",
-        #                      torch.stack([torch.eye(4).roll(d, 1) for d in (-1, 0, 1)]))  # left, straight, right
-        # self.register_buffer("unit", torch.tensor([[1., 0.], [0., -1.], [-1., 0.], [0., 1.]]))  # same order as t_direct
+        self.snap = snap
 
     def _smooth(self, points: torch.Tensor) -> torch.Tensor:
         x_ = torch.nn.functional.pad(
@@ -89,15 +95,22 @@ class WoodlouseCharacterStrokes(AbstractGlyph):
         x_ = x_ @ self.smooth.reshape(1, 1, 1, self.smooth.shape[0], 1)
         return x_.squeeze(-1)
 
-    def draw_line(self, directions: torch.Tensor, scale: torch.Tensor, n_points: int):
+    def draw_line(self, directions: torch.Tensor, scale: torch.Tensor, rotation: torch.Tensor, n_points: int):
         bs, n_strokes = directions.shape[:2]
         t = torch.full((n_points // 4,), 4. / n_points, device=directions.device)
-
-        cum_direct = (self.direction_vector.reshape(1, 1, 1, -1) * directions).sum(-1).cumsum(-2) * pi
+        hard = torch.nn.functional.one_hot(directions.argmax(-1), directions.shape[-1]).to(directions.dtype)
+        directions = directions + self.snap * (hard - directions).detach()
+        cum_direct = (self.direction_vector.reshape(1, 1, 1, -1) * directions).sum(-1).cumsum(-1) * pi / 2
         line_primitives = (torch.stack([cum_direct.cos(), -cum_direct.sin()], -1)[..., None, :] * t[:, None]).reshape(
             bs, n_strokes, n_points, 2
         ).cumsum(-2) * scale[..., None, None]
-        steps = line_primitives - line_primitives.mean(-2, keepdim=True)
+        cos_rot, sin_rot = (pi * rotation).cos(), (pi * rotation).sin()
+        rot_mat = torch.stack([
+            torch.stack([cos_rot, -sin_rot], dim=-1),
+            torch.stack([sin_rot, cos_rot], dim=-1),
+        ], dim=-2)
+        line_primitives = line_primitives - line_primitives.mean(-2, keepdim=True)
+        steps = (rot_mat.unsqueeze(2) @ line_primitives.unsqueeze(-1)).squeeze(-1)
         steps = self._smooth(steps)
         return steps
 
@@ -118,9 +131,10 @@ class WoodlouseCharacterStrokes(AbstractGlyph):
         parent_pos = properties[..., PROPERTIES["x"]]
         child_pos = properties[..., PROPERTIES["y"]]
         scale = properties[..., PROPERTIES["scale"]]
+        rotation = properties[..., PROPERTIES["rotation"]]
         scale = scale.masked_fill(scale < self.min_scale, 0.)
 
-        local_curves, strokes = self.draw_line(direct, n_points=n_points, scale=scale), []
+        local_curves, strokes = self.draw_line(direct, n_points=n_points, scale=scale, rotation=rotation), []
         parent_idx = parents(topology)
         for k, parent in enumerate(parent_idx):
             stroke = local_curves[:, k]

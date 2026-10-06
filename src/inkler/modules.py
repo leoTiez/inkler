@@ -82,7 +82,7 @@ class Pooler(torch.nn.Module):
         collate_idx = torch.where(mask, document_id + add_idx, -1)
 
         if self.pooling == "logmeanexp":
-            x_ = torch.exp(x_ / self.temperature.exp().expand(x_.shape))
+            x_ = torch.exp(x_ / self.temperature.exp().clip(min=.05, max=10).expand(x_.shape))
             pooling = "mean"
         else:
             pooling = self.pooling
@@ -103,7 +103,7 @@ class Pooler(torch.nn.Module):
             log_mask = t_ > 1e-8
             t_ = torch.where(
                 log_mask,
-                t_.clip(min=1e-8).log() * self.temperature.exp(),
+                t_.clip(min=1e-8).log() * self.temperature.exp().clip(min=.05, max=10),
                 torch.zeros_like(t_)
             )
 

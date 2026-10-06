@@ -268,8 +268,10 @@ class SDPDecoderBlock(torch.nn.Module):
             deplex_x = self.unpool(
                 pooled=enc_x,
                 seq_len=seq_len,
-                max_indices=demulidx,
-                mask=demulmask
+                # max_indices=demulidx,
+                hierarchy_idx=demulidx,
+                # mask=demulmask
+                mask=attn_mask
             )
 
             # hierarchy attention

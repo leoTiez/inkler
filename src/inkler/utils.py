@@ -62,7 +62,8 @@ def index_reduce_mps(
         source: torch.Tensor,
         mask: torch.Tensor,
         reduce: str ="sum",
-        include_self: bool = False
+        include_self: bool = False,
+        return_idx: bool = False,
 ):
     """
     index_reduce with an optional `mask` selecting which (index, source) pairs
@@ -116,6 +117,46 @@ def index_reduce_mps(
                 reduce=reduce,
                 include_self=include_self,
             )
+        if return_idx:
+            # fetch max positions
+            # remember that it's pooled individually per dimension over the sequence
+            # not a single vector selected out of x
+            pooled_for_source = out.index_select(0, index)
+            is_winner = mask.reshape(-1, 1) & (pooled_for_source == source)
+
+            # Flattened source position in input
+            flat_position = torch.arange(index.shape[0], device=source.device, dtype=torch.float32)
+            if source.dim() > 1:
+                flat_position = flat_position.reshape(-1, 1)
+            flat_position = broadcast_index(index=flat_position, source=source)
+            invalid_position = float(index.shape[0])
+
+            # get all possible candidate positions --> will select the lowest index over document id hierarchy
+            candidates = torch.where(
+                is_winner,
+                flat_position,
+                torch.full_like(flat_position, invalid_position),
+            ).to(torch.float32)
+
+            max_indices = torch.full(
+                (out.shape[0] - 1, out.shape[1]),
+                invalid_position,
+                device=source.device,
+                dtype=torch.float32,
+            )
+
+            # select the lowest index over document id hierarchy
+            out_idx, _ = index_reduce_mps(
+                input=max_indices,
+                dim=0,
+                index=index,
+                source=candidates,
+                reduce="amin",
+                include_self=True,
+                mask=mask,
+                return_idx=False
+            )
+            out_idx = out_idx.to(torch.int64)
 
     out = out.narrow(dim, 0, garbage)
     return out, out_idx

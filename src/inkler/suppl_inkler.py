@@ -83,4 +83,6 @@ class GlyphDecoder(torch.nn.Module):
         self.act_thresh = act_thresh
 
     def forward(self, theta):
-        return self.net(theta.flatten(1))
+        batch_size, seq_len = theta.shape[:2]
+        out = self.net(theta.reshape(batch_size * seq_len, -1))
+        return out.reshape(batch_size, seq_len, -1)

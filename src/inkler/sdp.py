@@ -250,23 +250,22 @@ class SDPDecoderBlock(torch.nn.Module):
 
     def forward(
             self,
-            x: Dict[int, torch.Tensor],
+            x: torch.Tensor,
             deplex_idx: List[torch.Tensor],
             deplex_mask: List[torch.Tensor],
             hierarchy_x: torch.Tensor,
             mask_hierarchy: bool = False
     ):
+        batch_size = x.shape[0]
         decode_x = []
         for i_d in range(len(self.st_layers) - 1, -1, -1):
             st_layer = self.st_layers[i_d]
             demulidx = deplex_idx[i_d]
-            demulmask = deplex_mask[i_d]
             attn_mask = deplex_mask[i_d - 1]
-            enc_x = x[i_d]
-            seq_len = x[i_d - 1].shape[1]
+            seq_len = demulidx.shape[0] // batch_size
 
             deplex_x = self.unpool(
-                pooled=enc_x,
+                pooled=x,
                 seq_len=seq_len,
                 # max_indices=demulidx,
                 hierarchy_idx=demulidx,
@@ -275,8 +274,8 @@ class SDPDecoderBlock(torch.nn.Module):
             )
 
             # hierarchy attention
-            dec_x = st_layer(deplex_x, hierarchy_x, attn_mask, mask_hierarchy=mask_hierarchy)
-            decode_x.append(dec_x.clone())
+            x = st_layer(deplex_x, hierarchy_x, attn_mask, mask_hierarchy=mask_hierarchy)
+            decode_x.append(x.clone())
 
         # return sentence embedding and class token
         return decode_x
@@ -402,7 +401,7 @@ class StructuralDocumentDecoder(torch.nn.Module):
                 deplex_idx=deplex_idx,
                 deplex_mask=deplex_mask,
                 hierarchy_x=hierarchy_x,
-                mask_hierarchy=False
+                mask_hierarchy=True
             )
 
         return decoded_x

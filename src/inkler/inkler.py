@@ -226,10 +226,39 @@ class Inkler(pl.LightningModule):
             hierarchy=hierarchy,
             attention_mask=attention_mask,
         )
+
         inkler_glyph = {}
         glyph_decoder = {}
         stroke_points = {}
-        for level, embedding in level_dict.items():
+
+        inkler_glyph[f"glyph_{self.n_hierarchy - 1}"] = self.inkler_glyph(document_x)
+        stroke_topology = get_stroke_topology(
+            n_strokes=self.n_strokes if self.consistent_hierarchy else self.n_strokes * 2 ** (self.n_hierarchy + 1),
+            n_connect=2 + self.n_hierarchy if self.consistent_hierarchy else 5,
+            use_connector_stroke=True,
+        ).to(document_x.device)
+
+        stroke_points[f"stroke_{self.n_hierarchy - 1}"] = self.character(
+            inkler_glyph[f"glyph_{self.n_hierarchy - 1}"],
+            topology=stroke_topology,
+            add_noise=True
+        )
+        perm_idx = torch.randperm(stroke_points[f"stroke_{self.n_hierarchy - 1}"].shape[1])
+        glyph_decoder[f"recon_{self.n_hierarchy - 1}"] = self.glyph_decoder(
+            stroke_points[f"stroke_{self.n_hierarchy - 1}"][:, perm_idx]
+        )
+
+        decode_x = self.inkler_decoder(
+            x=glyph_decoder[f"recon_{self.n_hierarchy - 1}"],
+            deplex_idx=deplex_idx,
+            deplex_mask=deplex_mask,
+            hierarchy_x=self.doc_token.expand(x_sentence.shape[0], -1, -1),
+        )
+        level_dict = {f"enc_{level}": v for level, v in level_dict.items()}
+        decoder_dict = {f"dec_{level - 1}": v for level, v in enumerate(reversed(decode_x))}
+
+        for level, embedding in decoder_dict.items():
+            level = int(level.replace("dec_", ""))
             inkler_glyph[f"glyph_{level}"] = self.inkler_glyph(embedding)
             stroke_topology = get_stroke_topology(
                 n_strokes=self.n_strokes if self.consistent_hierarchy else self.n_strokes * 2**(level + 2),
@@ -244,21 +273,8 @@ class Inkler(pl.LightningModule):
             perm_idx = torch.randperm(stroke_points[f"stroke_{level}"].shape[1])
             glyph_decoder[f"recon_{level}"] = self.glyph_decoder(stroke_points[f"stroke_{level}"][:, perm_idx])
 
-        decode_x = self.inkler_decoder(
-            x={
-                int(k.replace("recon_", "")): v.reshape(level_dict[int(k.replace("recon_", ""))].shape)
-                for k, v in glyph_decoder.items()
-            },
-            deplex_idx=deplex_idx,
-            deplex_mask=deplex_mask,
-            hierarchy_x=document_x,
-        )
-
         # score = self.inkler_score(document_x)
         genre = self.inkler_genre(document_x)
-
-        level_dict = {f"enc_{level}": v for level, v in level_dict.items()}
-        decoder_dict = {f"dec_{level - 1}": v for level, v in enumerate(reversed(decode_x))}
         out_dict =  {
             "document_x": document_x,
             "genre": genre,

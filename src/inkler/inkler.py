@@ -304,6 +304,7 @@ class Inkler(pl.LightningModule):
                 fwd_out[f"recon_{level}"].reshape(-1, self.d_model), fwd_out[f"enc_{level}"].reshape(-1, self.d_model)
             )
             if level < fwd_out["n_levels"] - 2:  # one less decoding
+                # TODO is this loss still needed with the document glyph bottleneck?
                 dec_e = dec_e + self.dec_loss(
                     fwd_out[f"dec_{level}"].reshape(-1, self.d_model), fwd_out[f"enc_{level}"].reshape(-1, self.d_model)
                 )

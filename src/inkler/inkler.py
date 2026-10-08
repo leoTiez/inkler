@@ -49,6 +49,7 @@ class Inkler(pl.LightningModule):
             postit_weight: float = 1.,
             decode_weight: float = 1.,
             topology_weight: float = 1.,
+            cosine_weight: float = 1.,
             genre_weight: float = .1,
             sparsity_weight: float = 0.05,
             sig_weight: float = 0.2,
@@ -161,6 +162,7 @@ class Inkler(pl.LightningModule):
         self.postit_w = postit_weight
         self.decode_w = decode_weight
         self.topology_w = topology_weight
+        self.cosine_w = cosine_weight
         self.sig = sig_weight
         self.annealing = annealing
         self.class_loss = torch.nn.BCELoss(reduction="mean")
@@ -320,6 +322,11 @@ class Inkler(pl.LightningModule):
                 fwd_out[f"stroke_{level}"],
                 topology=stroke_topology,
             )
+        norm_doc_x = fwd_out["document_x"] / torch.norm(fwd_out["document_x"], dim=-1, keepdim=True)
+        batch_size = norm_doc_x.shape[0]
+        cosine_sim = (norm_doc_x.squeeze(1) @ norm_doc_x.squeeze(1).transpose(-1, -2)).triu(1).sum() / torch.triu(
+            torch.ones((batch_size, batch_size), device=fwd_out["genre"].device), 1
+        ).sum()
 
         recon_e = recon_e / float(fwd_out["n_levels"])
         dec_e = dec_e / float(fwd_out["n_levels"] - 1)
@@ -344,12 +351,14 @@ class Inkler(pl.LightningModule):
             "recon_loss": recon_e,
             "decoder_loss": dec_e,
             "topology_loss": topology_e,
+            "document_cosine_sim": cosine_sim,
             "total_loss": (
                     self.genre_w * genre_e
                     + self.postit_w * postit_e
                     + self.recon_w * recon_e
                     + self.decode_w * dec_e
                     + self.topology_w * topology_e
+                    + self.cosine_w * cosine_sim
             )
         }
 

@@ -107,7 +107,8 @@ class Pooler(torch.nn.Module):
                 torch.zeros_like(t_)
             )
 
-        return t_, new_mask.detach(), out_idx.detach()  # avoid gradient flow from out_idx into reconstruction
+        # avoid gradient flow from out_idx into reconstruction
+        return t_, new_mask.detach(), out_idx.detach() if out_idx is not None else None
 
 
 class Unpooler(torch.nn.Module):

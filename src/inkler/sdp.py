@@ -152,9 +152,8 @@ class SDPEncoderBlock(torch.nn.Module):
             hierarchy: torch.Tensor,
             attention_mask: torch.Tensor,
             mask_hierarchy: bool = False,
-    ) -> Tuple[torch.Tensor | None, torch.Tensor, Dict[int, torch.Tensor], List[torch.Tensor], Dict[int, torch.Tensor]]:
-        sentence_embedding = None
-        out_embedding = {-1: x.clone()}
+    ) -> Tuple[torch.Tensor, Dict[int, torch.Tensor], List[torch.Tensor], Dict[int, torch.Tensor]]:
+        out_embedding = {}
         deplex_idx, deplex_mask = [], {}
         hid_idx = []
         if attention_mask.is_floating_point():
@@ -169,10 +168,6 @@ class SDPEncoderBlock(torch.nn.Module):
         for i_d, st_layer in enumerate(self.st_layers):
             # hierarchy attention
             x = st_layer(x, hierarchy_x, attention_mask_, mask_hierarchy=mask_hierarchy)
-            if i_d == 0:
-                # fetch sentence embedding that is used as input for next layer
-                # when i_d > 0, x continues being aggregated over hierarchy ids until class token is found
-                sentence_embedding = x.clone() # remove hierarchy token
 
             # pool embedding over hierarchy ides
             x, attention_mask_, demu_idx = self.pool(
@@ -207,7 +202,7 @@ class SDPEncoderBlock(torch.nn.Module):
                 hid = hid_.reshape(x.shape[:2])
                 hid_idx.append(hid.clone())
         # return sentence embedding and class token
-        return sentence_embedding, x, out_embedding, deplex_idx, deplex_mask
+        return x, out_embedding, deplex_idx, deplex_mask
 
 
 class SDPDecoderBlock(torch.nn.Module):
@@ -286,7 +281,6 @@ class StructuralDocumentProcessor(torch.nn.Module):
             self,
             d_model: int,
             n_heads: int,
-            seq_len: int,
             d_ff: int,
             n_blocks: int = 8,
             dropout: float = .1,
@@ -321,13 +315,20 @@ class StructuralDocumentProcessor(torch.nn.Module):
         ])
 
     @staticmethod
-    def _create_pe(seq_len: int, d_model: int, scaling: float = 1e5):
+    def _create_pe(seq_len: int, d_model: int, scaling: float = 1e4):
         pe = torch.zeros(seq_len, d_model)
         position = torch.arange(0, seq_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(scaling / d_model)))
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(scaling) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         return pe
+
+    def _embed_position(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, x_dim = x.shape
+        pe = self.pe[:seq_len].unsqueeze(0)
+        # do not add lowest hierarchy to position as this becomes the dominant signal for large books
+        x_ = x + pe
+        return x_
 
     def forward(
             self,
@@ -336,21 +337,21 @@ class StructuralDocumentProcessor(torch.nn.Module):
             hierarchy: torch.Tensor,
             attention_mask: torch.Tensor | None = None
     ):
-        batch_size, seq_len, x_dim = x.shape
-        pe = self.pe[:seq_len].unsqueeze(0)
-        # add lowest hierarchy to position
-        x = x + pe + hierarchy[:, :, -1].unsqueeze(-1)
+        x_std = x.std(dim=-1, keepdim=True)
+        x = (x - x.mean(dim=-1, keepdim=True)) / torch.where(x_std > 0, x_std, torch.ones_like(x_std))
+        x_ = self._embed_position(x)
         level_dict, deplex_idx, deplex_hid, deplex_mask = None, None, None, None
         for i_block, sdp_block in enumerate(self.sdp_blocks):
             # x is new sentence embedding, hierarchy_x is new class token
-            x, hierarchy_x, level_dict, deplex_idx, deplex_mask = sdp_block(
-                x,
+            hierarchy_x, level_dict, deplex_idx, deplex_mask = sdp_block(
+                x_,
                 hierarchy_x,
                 hierarchy,
                 attention_mask,
                 mask_hierarchy=i_block == 0
             )
 
+        level_dict[-1] = x.clone()
         return hierarchy_x, level_dict, deplex_idx, deplex_mask
 
 

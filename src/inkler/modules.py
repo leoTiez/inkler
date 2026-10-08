@@ -107,7 +107,7 @@ class Pooler(torch.nn.Module):
                 torch.zeros_like(t_)
             )
 
-        return t_, new_mask, out_idx
+        return t_, new_mask.detach(), out_idx.detach()  # avoid gradient flow from out_idx into reconstruction
 
 
 class Unpooler(torch.nn.Module):
@@ -116,12 +116,14 @@ class Unpooler(torch.nn.Module):
             d_model: int,
             init_shift: float = -10.,
             max_children: int = 50000,
+            dropout: float = 0.25,
     ):
         super().__init__()
         self.d_model = d_model
         self.max_children = max_children
         self.token = torch.nn.Parameter(torch.randn((1, self.d_model)) + init_shift)
         self.pos_emb = torch.nn.Embedding(max_children, d_model)
+        self.dropout = torch.nn.Dropout(p=dropout)
 
     def forward(
             self,
@@ -144,8 +146,8 @@ class Unpooler(torch.nn.Module):
 
         # broadcast each parent vector to all of its children, then add structural position
         out = pooled.reshape(-1, x_dim)[
-                  safe_parent.flatten()
-              ].reshape(batch_size, seq_len, x_dim) + self.pos_emb(safe_rank)
+              safe_parent.flatten()
+          ].reshape(batch_size, seq_len, x_dim) + self.dropout(self.pos_emb(safe_rank))
 
         # padding / invalid positions get the learned token
         return torch.where(valid.unsqueeze(-1), out, self.token.to(out.dtype))

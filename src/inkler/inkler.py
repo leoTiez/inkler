@@ -89,7 +89,6 @@ class Inkler(pl.LightningModule):
         self.inkler_embedder = sdp.StructuralDocumentProcessor(
             d_model=self.d_model,
             n_heads=n_heads,
-            seq_len=self.seq_len,
             d_ff=d_ff,
             n_blocks=self.n_enc_blocks,
             dropout=dropout,
@@ -243,9 +242,9 @@ class Inkler(pl.LightningModule):
             topology=stroke_topology,
             add_noise=True
         )
-        perm_idx = torch.randperm(stroke_points[f"stroke_{self.n_hierarchy - 1}"].shape[1])
+        # perm_idx = torch.randperm(stroke_points[f"stroke_{self.n_hierarchy - 1}"].shape[2])
         glyph_decoder[f"recon_{self.n_hierarchy - 1}"] = self.glyph_decoder(
-            stroke_points[f"stroke_{self.n_hierarchy - 1}"][:, perm_idx]
+            stroke_points[f"stroke_{self.n_hierarchy - 1}"]#[:, :, perm_idx]
         )
 
         decode_x = self.inkler_decoder(
@@ -270,11 +269,12 @@ class Inkler(pl.LightningModule):
                 topology=stroke_topology,
                 add_noise=True
             )
-            perm_idx = torch.randperm(stroke_points[f"stroke_{level}"].shape[1])
-            glyph_decoder[f"recon_{level}"] = self.glyph_decoder(stroke_points[f"stroke_{level}"][:, perm_idx])
+            # perm_idx = torch.randperm(stroke_points[f"stroke_{level}"].shape[2])
+            glyph_decoder[f"recon_{level}"] = self.glyph_decoder(stroke_points[f"stroke_{level}"])#[:, :, perm_idx])
 
         # score = self.inkler_score(document_x)
         genre = self.inkler_genre(document_x)
+        deplex_mask = {f"deplex_mask_{k}": m for k, m in deplex_mask.items()}
         out_dict =  {
             "document_x": document_x,
             "genre": genre,
@@ -283,7 +283,8 @@ class Inkler(pl.LightningModule):
             **decoder_dict,
             **inkler_glyph,
             **glyph_decoder,
-            **stroke_points
+            **stroke_points,
+            **deplex_mask
         }
 
         return out_dict
@@ -301,12 +302,14 @@ class Inkler(pl.LightningModule):
         topology_e = torch.tensor(0., device=fwd_out["genre"].device)
         for level in range(-1, fwd_out["n_levels"] - 1):  # shifted by 1
             recon_e = recon_e + self.recon_loss(
-                fwd_out[f"recon_{level}"].reshape(-1, self.d_model), fwd_out[f"enc_{level}"].reshape(-1, self.d_model)
+                fwd_out[f"recon_{level}"][~fwd_out[f"deplex_mask_{level}"]],
+                fwd_out[f"enc_{level}"][~fwd_out[f"deplex_mask_{level}"]].detach()
             )
             if level < fwd_out["n_levels"] - 2:  # one less decoding
                 # TODO is this loss still needed with the document glyph bottleneck?
                 dec_e = dec_e + self.dec_loss(
-                    fwd_out[f"dec_{level}"].reshape(-1, self.d_model), fwd_out[f"enc_{level}"].reshape(-1, self.d_model)
+                    fwd_out[f"dec_{level}"][~fwd_out[f"deplex_mask_{level}"]],
+                    fwd_out[f"enc_{level}"][~fwd_out[f"deplex_mask_{level}"]].detach()
                 )
             stroke_topology = get_stroke_topology(
                 n_strokes=self.n_strokes if self.consistent_hierarchy else self.n_strokes * 2**(level + 2),

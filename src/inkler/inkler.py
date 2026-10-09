@@ -324,8 +324,10 @@ class Inkler(pl.LightningModule):
             )
         norm_doc_x = fwd_out["document_x"] / torch.norm(fwd_out["document_x"], dim=-1, keepdim=True)
         batch_size = norm_doc_x.shape[0]
-        cosine_sim = (norm_doc_x.squeeze(1) @ norm_doc_x.squeeze(1).transpose(-1, -2)).triu(1).sum() / torch.triu(
-            torch.ones((batch_size, batch_size), device=fwd_out["genre"].device), 1
+        cosine_sim = (norm_doc_x.squeeze(1) @ norm_doc_x.squeeze(1).transpose(-1, -2)).triu(1).sum() / torch.arange(
+            batch_size,
+            dtype=torch.float,
+            device=self.device
         ).sum()
 
         recon_e = recon_e / float(fwd_out["n_levels"])

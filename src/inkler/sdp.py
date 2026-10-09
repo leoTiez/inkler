@@ -121,8 +121,10 @@ class SDPEncoderBlock(torch.nn.Module):
         if n_xca > n_hierarchy:
             raise ValueError("n_xca must be less than or equal to n_hierarchy")
         # first xca based transformer
+        self.d_model = d_model
+        self.n_hierarchy = n_hierarchy
         struture_embedding = [StructureTransformer(
-            d_model=d_model,
+            d_model=self.d_model,
             n_heads=n_heads,
             d_ff=d_ff,
             dropout=dropout,
@@ -131,19 +133,58 @@ class SDPEncoderBlock(torch.nn.Module):
         # then attention based transformer when sequence length has been reduced
         st_layers = [
             StructureTransformer(
-                d_model=d_model,
+                d_model=self.d_model,
                 n_heads=n_heads,
                 d_ff=d_ff,
                 dropout=dropout,
                 use_xca=False
-            ) for _ in range(n_hierarchy - n_xca)
+            ) for _ in range(self.n_hierarchy - n_xca)
         ]
         self.st_layers = torch.nn.ModuleList([
             *struture_embedding,
             *st_layers
         ])
 
+        self.register_buffer(
+            "pe",
+            self._create_pe(max(BUCKETS), self.d_model)
+        )
+        self.gamma = torch.nn.Parameter(.1 * torch.ones(self.n_hierarchy, dtype=torch.float))
         self.pool = Pooler(d_model, pooling=pooler_type)
+
+    @staticmethod
+    def _create_pe(
+            seq_len: int,
+            d_model: int,
+            scaling: float = 1e4,
+            position: torch.Tensor | None = None,
+            device: torch.device = torch.device("cpu")
+    ) -> torch.Tensor:
+
+        if position is None:
+            pe = torch.zeros((seq_len, d_model)).to(device).unsqueeze(0)
+            position = torch.arange(0, seq_len, dtype=torch.float).to(device)
+        else:
+            pe = torch.zeros((position.shape[0], seq_len, d_model)).to(device)
+        position = position.unsqueeze(-1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).to(device).float() * (-np.log(scaling) / d_model))
+        pe[..., 0::2] = torch.sin(position * div_term)
+        pe[..., 1::2] = torch.cos(position * div_term)
+        return pe
+
+    def _embed_position(self, x: torch.Tensor, hierarchy: torch.Tensor | None) -> torch.Tensor:
+        batch_size, seq_len, x_dim = x.shape
+        if hierarchy is None:
+            pe = self.pe[:seq_len].unsqueeze(0).float()
+        else:
+            with torch.no_grad():
+                pe = torch.zeros_like(x)
+                if hierarchy.dim() < 3:
+                    hierarchy = hierarchy.unsqueeze(-1)
+                for hid in range(hierarchy.shape[-1]):
+                    child_order = child_order_within_parent(hierarchy[..., -hid]).float().to(x.device)
+                    pe = pe + self.gamma[-hid] * self._create_pe(seq_len, x_dim, position=child_order, device=x.device)
+        return x + pe
 
     def forward(
             self,
@@ -164,9 +205,10 @@ class SDPEncoderBlock(torch.nn.Module):
         deplex_mask[-1] = attention_mask_.clone()
         attention_mask = ~attention_mask
         # fetch lowest hierarchy which are paragraphs
+        # hierarchy attention
+        x = self._embed_position(x, hierarchy)
         hid = hierarchy[..., -1]
         for i_d, st_layer in enumerate(self.st_layers):
-            # hierarchy attention
             x = st_layer(x, hierarchy_x, attention_mask_, mask_hierarchy=mask_hierarchy)
 
             # pool embedding over hierarchy ides
@@ -298,15 +340,10 @@ class StructuralDocumentProcessor(torch.nn.Module):
             raise ValueError("n_blocks must be a positive integer")
         self.n_blocks = n_blocks
 
-        self.register_buffer(
-            "pe",
-            self._create_pe(max(BUCKETS), self.d_model)
-        )
         self.ema_sentence_set = False
         self.ema_document_set = False
         self.register_buffer("ema_sentence", torch.zeros((1, 1, self.d_model)))
         self.register_buffer("ema_document", torch.zeros((1, 1, self.d_model)))
-        self.gamma = torch.nn.Parameter(torch.tensor(.1))
         self.ema_weight = ema_weight
         self.sdp_blocks = torch.nn.ModuleList([
                 SDPEncoderBlock(
@@ -321,26 +358,6 @@ class StructuralDocumentProcessor(torch.nn.Module):
         ])
 
     @staticmethod
-    def _create_pe(
-            seq_len: int,
-            d_model: int,
-            scaling: float = 1e4,
-            position: torch.Tensor | None = None,
-            device: torch.device = torch.device("cpu")
-    ) -> torch.Tensor:
-
-        if position is None:
-            pe = torch.zeros((seq_len, d_model)).to(device).unsqueeze(0)
-            position = torch.arange(0, seq_len, dtype=torch.float).to(device)
-        else:
-            pe = torch.zeros((position.shape[0], seq_len, d_model)).to(device)
-        position = position.unsqueeze(-1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).to(device).float() * (-np.log(scaling) / d_model))
-        pe[..., 0::2] = torch.sin(position * div_term)
-        pe[..., 1::2] = torch.cos(position * div_term)
-        return pe
-
-    @staticmethod
     def _update_ema(x: torch.Tensor, ema: torch.Tensor, mask: torch.Tensor, ema_weight: float):
         feat_dim = x.shape[-1]
         return ema * ema_weight + (1 - ema_weight) * x[~mask].reshape(-1, feat_dim).mean(0, keepdim=True).unsqueeze(0)
@@ -349,25 +366,15 @@ class StructuralDocumentProcessor(torch.nn.Module):
     def _update_sentence_ema(self, x: torch.Tensor, mask: torch.Tensor):
         if self.training:
             ema_weight = self.ema_weight if self.ema_sentence_set else 0.
+            self.ema_sentence_set = True
             self.ema_sentence = self._update_ema(x, self.ema_sentence, mask, ema_weight)
 
     @torch.no_grad()
     def _update_document_ema(self, x: torch.Tensor, mask: torch.Tensor):
         if self.training:
             ema_weight = self.ema_weight if self.ema_document_set else 0.
+            self.ema_document_set = True
             self.ema_document = self._update_ema(x, self.ema_document, mask, ema_weight)
-
-    def _embed_position(self, x: torch.Tensor, hierarchy: torch.Tensor | None = None) -> torch.Tensor:
-        batch_size, seq_len, x_dim = x.shape
-        if hierarchy is None:
-            pe = self.pe[:seq_len].unsqueeze(0).float()
-        else:
-            with torch.no_grad():
-                sentence_in_paragraph = child_order_within_parent(hierarchy[..., -1]).float().to(x.device)
-                pe = self._create_pe(seq_len, x_dim, position=sentence_in_paragraph, device=x.device)
-        # do not add lowest hierarchy to position as this becomes the dominant signal for large books
-        x_ = x + self.gamma * pe
-        return x_
 
     def forward(
             self,
@@ -382,12 +389,11 @@ class StructuralDocumentProcessor(torch.nn.Module):
         x = (x - x.mean(dim=-1, keepdim=True)) / torch.where(x_std > 0, x_std, torch.ones_like(x_std))
         self._update_sentence_ema(x, attention_mask.bool())
         x = x - self.ema_sentence
-        x_ = self._embed_position(x, hierarchy)
         level_dict, deplex_idx, deplex_hid, deplex_mask = None, None, None, None
         for i_block, sdp_block in enumerate(self.sdp_blocks):
             # x is new sentence embedding, hierarchy_x is new class token
             hierarchy_x, level_dict, deplex_idx, deplex_mask = sdp_block(
-                x_,
+                x,
                 hierarchy_x,
                 hierarchy,
                 attention_mask,

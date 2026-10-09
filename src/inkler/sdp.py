@@ -3,7 +3,7 @@ from typing import Tuple, Dict, List
 import torch
 
 from inkler.modules import XCA, AttentionWrapper, Pooler, Unpooler
-from inkler.utils import index_reduce_mps
+from inkler.utils import index_reduce_mps, child_order_within_parent
 from inkler.constants import BUCKETS
 
 
@@ -287,6 +287,7 @@ class StructuralDocumentProcessor(torch.nn.Module):
             n_xca: int = 2,
             n_hierarchy: int = 3,
             pooler_type: str = "amax",
+            ema_weight: float = .99
     ):
         super().__init__()
         if d_model < 1:
@@ -301,7 +302,12 @@ class StructuralDocumentProcessor(torch.nn.Module):
             "pe",
             self._create_pe(max(BUCKETS), self.d_model)
         )
-
+        self.ema_sentence_set = False
+        self.ema_document_set = False
+        self.register_buffer("ema_sentence", torch.zeros((1, 1, self.d_model)))
+        self.register_buffer("ema_document", torch.zeros((1, 1, self.d_model)))
+        self.gamma = torch.nn.Parameter(torch.tensor(.1))
+        self.ema_weight = ema_weight
         self.sdp_blocks = torch.nn.ModuleList([
                 SDPEncoderBlock(
                     d_model=self.d_model,
@@ -315,19 +321,52 @@ class StructuralDocumentProcessor(torch.nn.Module):
         ])
 
     @staticmethod
-    def _create_pe(seq_len: int, d_model: int, scaling: float = 1e4):
-        pe = torch.zeros(seq_len, d_model)
-        position = torch.arange(0, seq_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(scaling) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
+    def _create_pe(
+            seq_len: int,
+            d_model: int,
+            scaling: float = 1e4,
+            position: torch.Tensor | None = None,
+            device: torch.device = torch.device("cpu")
+    ) -> torch.Tensor:
+
+        if position is None:
+            pe = torch.zeros((seq_len, d_model)).to(device).unsqueeze(0)
+            position = torch.arange(0, seq_len, dtype=torch.float).to(device)
+        else:
+            pe = torch.zeros((position.shape[0], seq_len, d_model)).to(device)
+        position = position.unsqueeze(-1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).to(device).float() * (-np.log(scaling) / d_model))
+        pe[..., 0::2] = torch.sin(position * div_term)
+        pe[..., 1::2] = torch.cos(position * div_term)
         return pe
 
-    def _embed_position(self, x: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def _update_ema(x: torch.Tensor, ema: torch.Tensor, mask: torch.Tensor, ema_weight: float):
+        feat_dim = x.shape[-1]
+        return ema * ema_weight + (1 - ema_weight) * x[~mask].reshape(-1, feat_dim).mean(0, keepdim=True).unsqueeze(0)
+
+    @torch.no_grad()
+    def _update_sentence_ema(self, x: torch.Tensor, mask: torch.Tensor):
+        if self.training:
+            ema_weight = self.ema_weight if self.ema_sentence_set else 0.
+            self.ema_sentence = self._update_ema(x, self.ema_sentence, mask, ema_weight)
+
+    @torch.no_grad()
+    def _update_document_ema(self, x: torch.Tensor, mask: torch.Tensor):
+        if self.training:
+            ema_weight = self.ema_weight if self.ema_document_set else 0.
+            self.ema_document = self._update_ema(x, self.ema_document, mask, ema_weight)
+
+    def _embed_position(self, x: torch.Tensor, hierarchy: torch.Tensor | None = None) -> torch.Tensor:
         batch_size, seq_len, x_dim = x.shape
-        pe = self.pe[:seq_len].unsqueeze(0)
+        if hierarchy is None:
+            pe = self.pe[:seq_len].unsqueeze(0).float()
+        else:
+            with torch.no_grad():
+                sentence_in_paragraph = child_order_within_parent(hierarchy[..., -1]).float().to(x.device)
+                pe = self._create_pe(seq_len, x_dim, position=sentence_in_paragraph, device=x.device)
         # do not add lowest hierarchy to position as this becomes the dominant signal for large books
-        x_ = x + pe
+        x_ = x + self.gamma * pe
         return x_
 
     def forward(
@@ -337,9 +376,13 @@ class StructuralDocumentProcessor(torch.nn.Module):
             hierarchy: torch.Tensor,
             attention_mask: torch.Tensor | None = None
     ):
+        if attention_mask is None:
+            attention_mask = torch.zeros(x.shape[:2], device=x.device, dtype=torch.bool)
         x_std = x.std(dim=-1, keepdim=True)
         x = (x - x.mean(dim=-1, keepdim=True)) / torch.where(x_std > 0, x_std, torch.ones_like(x_std))
-        x_ = self._embed_position(x)
+        self._update_sentence_ema(x, attention_mask.bool())
+        x = x - self.ema_sentence
+        x_ = self._embed_position(x, hierarchy)
         level_dict, deplex_idx, deplex_hid, deplex_mask = None, None, None, None
         for i_block, sdp_block in enumerate(self.sdp_blocks):
             # x is new sentence embedding, hierarchy_x is new class token
@@ -352,6 +395,11 @@ class StructuralDocumentProcessor(torch.nn.Module):
             )
 
         level_dict[-1] = x.clone()
+        document_key = max(level_dict.keys())
+        batch_size = hierarchy_x.shape[0]
+        self._update_document_ema(hierarchy_x, torch.zeros(batch_size, 1, dtype=torch.bool, device=x.device))
+        hierarchy_x = hierarchy_x - self.ema_document
+        level_dict[document_key] = hierarchy_x.clone()
         return hierarchy_x, level_dict, deplex_idx, deplex_mask
 
 

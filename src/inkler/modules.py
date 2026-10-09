@@ -1,5 +1,6 @@
 from typing import Tuple
 import torch
+from torch.nn import functional as F
 
 from inkler.utils import index_reduce_mps, canonical_mask, child_order_within_parent
 from inkler.constants import BUCKETS
@@ -82,7 +83,7 @@ class Pooler(torch.nn.Module):
         collate_idx = torch.where(mask, document_id + add_idx, -1)
 
         if self.pooling == "logmeanexp":
-            x_ = torch.exp(x_ / self.temperature.exp().clip(min=.05, max=10).expand(x_.shape))
+            x_ = torch.exp(x_ / F.softplus(self.temperature).expand(x_.shape).clip(min=0.05, max=10.))
             pooling = "mean"
         else:
             pooling = self.pooling
@@ -103,7 +104,7 @@ class Pooler(torch.nn.Module):
             log_mask = t_ > 1e-8
             t_ = torch.where(
                 log_mask,
-                t_.clip(min=1e-8).log() * self.temperature.exp().clip(min=.05, max=10),
+                t_.clip(min=1e-8).log() * F.softplus(self.temperature).clip(min=0.05, max=10.),
                 torch.zeros_like(t_)
             )
 

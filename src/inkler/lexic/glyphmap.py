@@ -57,13 +57,17 @@ class LexicInklerGlyph(torch.nn.Module):
             torch.nn.GELU(),
             torch.nn.Linear(256, self.n_strokes * (len(LEXIC) + len(PROPERTIES)))
         )
-        self.temperature = 1.0
+        self.register_buffer("temperature", torch.tensor(1.))
 
     def forward(self, z):
         batch_size, seq_len = z.shape[:2]
         theta = self.net(z).view(-1, self.n_strokes, (len(LEXIC) + len(PROPERTIES)))
+        if self.training:
+            jitter = self.temperature * torch.randn_like(theta[..., :len(LEXIC)])
+        else:
+            jitter = torch.zeros_like(theta[..., :len(LEXIC)])
         # circle line hook activation
-        clh = (theta[..., :len(LEXIC)] + self.temperature * torch.randn_like(theta[..., :len(LEXIC)])).softmax(dim=-1)
+        clh = (theta[..., :len(LEXIC)] + jitter).softmax(dim=-1)
         properties = theta[..., len(LEXIC):]
         # position
         x = torch.tanh(properties[..., PROPERTIES["x"]]).unsqueeze(-1)

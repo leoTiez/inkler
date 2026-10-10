@@ -340,8 +340,8 @@ class StructuralDocumentProcessor(torch.nn.Module):
             raise ValueError("n_blocks must be a positive integer")
         self.n_blocks = n_blocks
 
-        self.ema_sentence_set = False
-        self.ema_document_set = False
+        self.register_buffer("ema_sentence_set", torch.tensor(0.))
+        self.register_buffer("ema_document_set", torch.tensor(0.))
         self.register_buffer("ema_sentence", torch.zeros((1, 1, self.d_model)))
         self.register_buffer("ema_document", torch.zeros((1, 1, self.d_model)))
         self.ema_weight = ema_weight
@@ -365,15 +365,15 @@ class StructuralDocumentProcessor(torch.nn.Module):
     @torch.no_grad()
     def _update_sentence_ema(self, x: torch.Tensor, mask: torch.Tensor):
         if self.training:
-            ema_weight = self.ema_weight if self.ema_sentence_set else 0.
-            self.ema_sentence_set = True
+            ema_weight = self.ema_weight if (self.ema_sentence_set == 1.).all() else 0.
+            self.ema_sentence_set = torch.tensor(1.).to(x.device)
             self.ema_sentence = self._update_ema(x, self.ema_sentence, mask, ema_weight)
 
     @torch.no_grad()
     def _update_document_ema(self, x: torch.Tensor, mask: torch.Tensor):
         if self.training:
-            ema_weight = self.ema_weight if self.ema_document_set else 0.
-            self.ema_document_set = True
+            ema_weight = self.ema_weight if (self.ema_document_set == 1.).all() else 0.
+            self.ema_document_set = torch.tensor(1.).to(x.device)
             self.ema_document = self._update_ema(x, self.ema_document, mask, ema_weight)
 
     def forward(

@@ -1,5 +1,5 @@
 import logging
-from typing import Callable, Tuple, Dict
+from typing import Callable, Tuple, Dict, Any, Optional
 from pathlib import Path
 import os
 import math
@@ -169,8 +169,8 @@ class Inkler(pl.LightningModule):
         self.recon_loss = torch.nn.MSELoss(reduction="mean")
         self.dec_loss = torch.nn.MSELoss(reduction="mean")
         self.glyph_log_dir = None
-        self.val_step = -1
-        self.train_step = -1
+        self.register_buffer("val_step", torch.tensor(-1.))
+        self.register_buffer("train_step", torch.tensor(-1.))
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
         logger.info(f"Use RAdam optimizer with lr {self.lr} and betas {self.betas}")
@@ -364,11 +364,14 @@ class Inkler(pl.LightningModule):
             )
         }
 
+    @torch.no_grad()
+    def on_train_batch_start(self, batch: Any, batch_idx: int) -> Optional[int]:
+        self.train_step += 1
+
     def training_step(
             self,
             batch: Dict,
     ):
-        self.train_step += 1
         result_dict = self(
             x_sentence=batch["texts"],
             hierarchy=batch["hierarchy"],
@@ -385,7 +388,7 @@ class Inkler(pl.LightningModule):
         utils.log_mps_memory("After loss calculation", device=self.device.type)
 
         if hasattr(self.inkler_glyph, "temperature"):
-            self.inkler_glyph.temperature = math.exp(-self.train_step * self.annealing)
+            self.inkler_glyph.temperature = torch.exp(-self.train_step * self.annealing)
         self.log(name="train_loss", value=loss_dict["total_loss"], on_step=True, on_epoch=False, prog_bar=True)
         for loss_name, loss_val in loss_dict.items():
             if loss_name != "total_loss":

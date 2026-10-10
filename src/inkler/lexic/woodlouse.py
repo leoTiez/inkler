@@ -32,17 +32,18 @@ class WoodlouseInklerGlyph(torch.nn.Module):
             torch.nn.GELU(),
             torch.nn.Linear(256, self.n_strokes * (len(DIRECTION) * 4 + len(PROPERTIES)))
         )
-        self.temperature = 1.
+        self.register_buffer("temperature", torch.tensor(1.))
 
     def forward(self, z):
         batch_size, seq_len = z.shape[:2]
         theta = self.net(z).view(-1, self.n_strokes, (len(DIRECTION) * 4 + len(PROPERTIES)))
+        if self.training:
+            jitter = self.temperature * torch.randn_like(theta[..., :len(DIRECTION) * 4])
+        else:
+            jitter = torch.zeros_like(theta[..., :len(DIRECTION) * 4])
         # circle line hook activation
         n_theta = theta.shape[0]
-        direct = (
-                theta[..., :len(DIRECTION) * 4]
-                + self.temperature * torch.randn_like(theta[..., :len(DIRECTION) * 4])
-        ).reshape(
+        direct = (theta[..., :len(DIRECTION) * 4] + jitter).reshape(
             n_theta, self.n_strokes, -1, len(DIRECTION)
         ).softmax(dim=-1).reshape(-1, self.n_strokes, len(DIRECTION) * 4)
         properties = theta[..., -len(PROPERTIES):]

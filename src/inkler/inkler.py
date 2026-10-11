@@ -329,6 +329,7 @@ class Inkler(pl.LightningModule):
             dtype=torch.float,
             device=self.device
         ).sum()
+        cosine_sim = cosine_sim.abs()
 
         recon_e = recon_e / float(fwd_out["n_levels"])
         dec_e = dec_e / float(fwd_out["n_levels"] - 1)

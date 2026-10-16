@@ -45,6 +45,7 @@ class Inkler(pl.LightningModule):
             dropout: float = 0.1,
             norm_eps: float = 1e-6,
             n_strokes: int = 32,
+            n_connect: int = 5,
             recon_weight: float = 1.,
             postit_weight: float = 1.,
             decode_weight: float = 1.,
@@ -115,6 +116,7 @@ class Inkler(pl.LightningModule):
         if render_params is None:
             render_params = {}
 
+        self.n_connect = n_connect
         max_stroke = self.n_strokes if self.consistent_hierarchy else n_strokes * 2 ** (self.n_hierarchy + 1)
         self.glyph_decoder = GlyphDecoder(
             d_model=self.d_model,
@@ -235,7 +237,7 @@ class Inkler(pl.LightningModule):
         inkler_glyph[f"glyph_{self.n_hierarchy - 1}"] = self.inkler_glyph(document_x)
         stroke_topology = get_stroke_topology(
             n_strokes=self.n_strokes if self.consistent_hierarchy else self.n_strokes * 2 ** (self.n_hierarchy + 1),
-            n_connect=2 + self.n_hierarchy if self.consistent_hierarchy else 5,
+            n_connect=self.n_connect,
             use_connector_stroke=True,
         ).to(document_x.device)
 
@@ -263,7 +265,7 @@ class Inkler(pl.LightningModule):
             inkler_glyph[f"glyph_{level}"] = self.inkler_glyph(embedding)
             stroke_topology = get_stroke_topology(
                 n_strokes=self.n_strokes if self.consistent_hierarchy else self.n_strokes * 2**(level + 2),
-                n_connect=3 + level if self.consistent_hierarchy else 5,
+                n_connect=self.n_connect,
                 use_connector_stroke=True,
             ).to(document_x.device)
             stroke_points[f"stroke_{level}"] = self.character(
@@ -315,7 +317,7 @@ class Inkler(pl.LightningModule):
                 )
             stroke_topology = get_stroke_topology(
                 n_strokes=self.n_strokes if self.consistent_hierarchy else self.n_strokes * 2**(level + 2),
-                n_connect=3 + level if self.consistent_hierarchy else 5,
+                n_connect=self.n_connect,
                 use_connector_stroke=True,
             ).to(fwd_out["genre"].device)
             topology_e = topology_e + self.contact_loss(

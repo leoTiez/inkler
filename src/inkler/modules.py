@@ -33,6 +33,9 @@ class Pooler(torch.nn.Module):
             self,
             d_model: int,
             pooling: str = "amax",
+            min_logsumexp: float = 1e-6,
+            min_temperature: float = .05,
+            max_temperature: float = 10.
     ):
         super(Pooler, self).__init__()
         self.d_model = d_model
@@ -40,6 +43,9 @@ class Pooler(torch.nn.Module):
             raise ValueError("pooling not understood.")
 
         self.pooling = pooling.lower()
+        self.min_logsumexp = min_logsumexp
+        self.min_temperature = min_temperature
+        self.max_temperature = max_temperature
         self.temperature = torch.nn.Parameter(torch.randn((1, 1, self.d_model)))
 
     def forward(
@@ -83,7 +89,10 @@ class Pooler(torch.nn.Module):
         collate_idx = torch.where(mask, document_id + add_idx, -1)
 
         if self.pooling == "logmeanexp":
-            x_ = torch.exp(x_ / F.softplus(self.temperature).expand(x_.shape).clip(min=0.05, max=5.))
+            x_ = torch.exp(x_ / F.softplus(self.temperature).expand(x_.shape).clip(
+                min=self.min_temperature,
+                max=self.max_temperature
+            ))
             pooling = "mean"
         else:
             pooling = self.pooling
@@ -101,10 +110,13 @@ class Pooler(torch.nn.Module):
         # reshape
         t_ = t_.reshape(batch_size, out_size, x_dim)
         if self.pooling == "logmeanexp":
-            log_mask = t_ > 1e-8
+            log_mask = t_ > self.min_logsumexp
             t_ = torch.where(
                 log_mask,
-                t_.clip(min=1e-8).log() * F.softplus(self.temperature).clip(min=0.05, max=10.),
+                t_.clip(min=self.min_logsumexp).log() * F.softplus(self.temperature).clip(
+                    min=self.min_temperature,
+                    max=self.max_temperature
+                ),
                 torch.zeros_like(t_)
             )
 

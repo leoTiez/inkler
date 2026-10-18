@@ -1,5 +1,5 @@
 import logging
-from typing import Callable, Tuple, Dict
+from typing import Callable, Tuple, Dict, Any, Optional
 from pathlib import Path
 import os
 import math
@@ -45,10 +45,12 @@ class Inkler(pl.LightningModule):
             dropout: float = 0.1,
             norm_eps: float = 1e-6,
             n_strokes: int = 32,
+            n_connect: int = 5,
             recon_weight: float = 1.,
             postit_weight: float = 1.,
             decode_weight: float = 1.,
             topology_weight: float = 1.,
+            cosine_weight: float = 1.,
             genre_weight: float = .1,
             sparsity_weight: float = 0.05,
             sig_weight: float = 0.2,
@@ -89,7 +91,6 @@ class Inkler(pl.LightningModule):
         self.inkler_embedder = sdp.StructuralDocumentProcessor(
             d_model=self.d_model,
             n_heads=n_heads,
-            seq_len=self.seq_len,
             d_ff=d_ff,
             n_blocks=self.n_enc_blocks,
             dropout=dropout,
@@ -115,6 +116,7 @@ class Inkler(pl.LightningModule):
         if render_params is None:
             render_params = {}
 
+        self.n_connect = n_connect
         max_stroke = self.n_strokes if self.consistent_hierarchy else n_strokes * 2 ** (self.n_hierarchy + 1)
         self.glyph_decoder = GlyphDecoder(
             d_model=self.d_model,
@@ -162,14 +164,15 @@ class Inkler(pl.LightningModule):
         self.postit_w = postit_weight
         self.decode_w = decode_weight
         self.topology_w = topology_weight
+        self.cosine_w = cosine_weight
         self.sig = sig_weight
         self.annealing = annealing
         self.class_loss = torch.nn.BCELoss(reduction="mean")
         self.recon_loss = torch.nn.MSELoss(reduction="mean")
         self.dec_loss = torch.nn.MSELoss(reduction="mean")
         self.glyph_log_dir = None
-        self.val_step = -1
-        self.train_step = -1
+        self.register_buffer("val_step", torch.tensor(-1.))
+        self.register_buffer("train_step", torch.tensor(-1.))
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
         logger.info(f"Use RAdam optimizer with lr {self.lr} and betas {self.betas}")
@@ -226,14 +229,43 @@ class Inkler(pl.LightningModule):
             hierarchy=hierarchy,
             attention_mask=attention_mask,
         )
+
         inkler_glyph = {}
         glyph_decoder = {}
         stroke_points = {}
-        for level, embedding in level_dict.items():
+
+        inkler_glyph[f"glyph_{self.n_hierarchy - 1}"] = self.inkler_glyph(document_x)
+        stroke_topology = get_stroke_topology(
+            n_strokes=self.n_strokes if self.consistent_hierarchy else self.n_strokes * 2 ** (self.n_hierarchy + 1),
+            n_connect=self.n_connect,
+            use_connector_stroke=True,
+        ).to(document_x.device)
+
+        stroke_points[f"stroke_{self.n_hierarchy - 1}"] = self.character(
+            inkler_glyph[f"glyph_{self.n_hierarchy - 1}"],
+            topology=stroke_topology,
+            add_noise=True
+        )
+        # perm_idx = torch.randperm(stroke_points[f"stroke_{self.n_hierarchy - 1}"].shape[2])
+        glyph_decoder[f"recon_{self.n_hierarchy - 1}"] = self.glyph_decoder(
+            stroke_points[f"stroke_{self.n_hierarchy - 1}"]#[:, :, perm_idx]
+        )
+
+        decode_x = self.inkler_decoder(
+            x=glyph_decoder[f"recon_{self.n_hierarchy - 1}"],
+            deplex_idx=deplex_idx,
+            deplex_mask=deplex_mask,
+            hierarchy_x=self.doc_token.expand(x_sentence.shape[0], -1, -1),
+        )
+        level_dict = {f"enc_{level}": v for level, v in level_dict.items()}
+        decoder_dict = {f"dec_{level - 1}": v for level, v in enumerate(reversed(decode_x))}
+
+        for level, embedding in decoder_dict.items():
+            level = int(level.replace("dec_", ""))
             inkler_glyph[f"glyph_{level}"] = self.inkler_glyph(embedding)
             stroke_topology = get_stroke_topology(
                 n_strokes=self.n_strokes if self.consistent_hierarchy else self.n_strokes * 2**(level + 2),
-                n_connect=3 + level if self.consistent_hierarchy else 5,
+                n_connect=self.n_connect,
                 use_connector_stroke=True,
             ).to(document_x.device)
             stroke_points[f"stroke_{level}"] = self.character(
@@ -241,24 +273,12 @@ class Inkler(pl.LightningModule):
                 topology=stroke_topology,
                 add_noise=True
             )
-            perm_idx = torch.randperm(stroke_points[f"stroke_{level}"].shape[1])
-            glyph_decoder[f"recon_{level}"] = self.glyph_decoder(stroke_points[f"stroke_{level}"][:, perm_idx])
-
-        decode_x = self.inkler_decoder(
-            x={
-                int(k.replace("recon_", "")): v.reshape(level_dict[int(k.replace("recon_", ""))].shape)
-                for k, v in glyph_decoder.items()
-            },
-            deplex_idx=deplex_idx,
-            deplex_mask=deplex_mask,
-            hierarchy_x=document_x,
-        )
+            # perm_idx = torch.randperm(stroke_points[f"stroke_{level}"].shape[2])
+            glyph_decoder[f"recon_{level}"] = self.glyph_decoder(stroke_points[f"stroke_{level}"])#[:, :, perm_idx])
 
         # score = self.inkler_score(document_x)
         genre = self.inkler_genre(document_x)
-
-        level_dict = {f"enc_{level}": v for level, v in level_dict.items()}
-        decoder_dict = {f"dec_{level - 1}": v for level, v in enumerate(reversed(decode_x))}
+        deplex_mask = {f"deplex_mask_{k}": m for k, m in deplex_mask.items()}
         out_dict =  {
             "document_x": document_x,
             "genre": genre,
@@ -267,7 +287,8 @@ class Inkler(pl.LightningModule):
             **decoder_dict,
             **inkler_glyph,
             **glyph_decoder,
-            **stroke_points
+            **stroke_points,
+            **deplex_mask
         }
 
         return out_dict
@@ -285,21 +306,33 @@ class Inkler(pl.LightningModule):
         topology_e = torch.tensor(0., device=fwd_out["genre"].device)
         for level in range(-1, fwd_out["n_levels"] - 1):  # shifted by 1
             recon_e = recon_e + self.recon_loss(
-                fwd_out[f"recon_{level}"].reshape(-1, self.d_model), fwd_out[f"enc_{level}"].reshape(-1, self.d_model)
+                fwd_out[f"recon_{level}"][~fwd_out[f"deplex_mask_{level}"]],
+                fwd_out[f"enc_{level}"][~fwd_out[f"deplex_mask_{level}"]].detach()
             )
             if level < fwd_out["n_levels"] - 2:  # one less decoding
+                # TODO is this loss still needed with the document glyph bottleneck?
                 dec_e = dec_e + self.dec_loss(
-                    fwd_out[f"dec_{level}"].reshape(-1, self.d_model), fwd_out[f"enc_{level}"].reshape(-1, self.d_model)
+                    fwd_out[f"dec_{level}"][~fwd_out[f"deplex_mask_{level}"]],
+                    fwd_out[f"enc_{level}"][~fwd_out[f"deplex_mask_{level}"]].detach()
                 )
             stroke_topology = get_stroke_topology(
                 n_strokes=self.n_strokes if self.consistent_hierarchy else self.n_strokes * 2**(level + 2),
-                n_connect=3 + level if self.consistent_hierarchy else 5,
+                n_connect=self.n_connect,
                 use_connector_stroke=True,
+                symmetric=True
             ).to(fwd_out["genre"].device)
             topology_e = topology_e + self.contact_loss(
                 fwd_out[f"stroke_{level}"],
                 topology=stroke_topology,
             )
+        norm_doc_x = fwd_out["document_x"] / torch.norm(fwd_out["document_x"], dim=-1, keepdim=True)
+        batch_size = norm_doc_x.shape[0]
+        cosine_sim = (norm_doc_x.squeeze(1) @ norm_doc_x.squeeze(1).transpose(-1, -2)).triu(1).sum() / torch.arange(
+            batch_size,
+            dtype=torch.float,
+            device=self.device
+        ).sum()
+        cosine_sim = cosine_sim.abs()
 
         recon_e = recon_e / float(fwd_out["n_levels"])
         dec_e = dec_e / float(fwd_out["n_levels"] - 1)
@@ -324,20 +357,25 @@ class Inkler(pl.LightningModule):
             "recon_loss": recon_e,
             "decoder_loss": dec_e,
             "topology_loss": topology_e,
+            "document_cosine_sim": cosine_sim,
             "total_loss": (
                     self.genre_w * genre_e
                     + self.postit_w * postit_e
                     + self.recon_w * recon_e
                     + self.decode_w * dec_e
                     + self.topology_w * topology_e
+                    + self.cosine_w * cosine_sim
             )
         }
+
+    @torch.no_grad()
+    def on_train_batch_start(self, batch: Any, batch_idx: int) -> Optional[int]:
+        self.train_step += 1
 
     def training_step(
             self,
             batch: Dict,
     ):
-        self.train_step += 1
         result_dict = self(
             x_sentence=batch["texts"],
             hierarchy=batch["hierarchy"],
@@ -354,7 +392,7 @@ class Inkler(pl.LightningModule):
         utils.log_mps_memory("After loss calculation", device=self.device.type)
 
         if hasattr(self.inkler_glyph, "temperature"):
-            self.inkler_glyph.temperature = math.exp(-self.train_step * self.annealing)
+            self.inkler_glyph.temperature = torch.exp(-self.train_step * self.annealing)
         self.log(name="train_loss", value=loss_dict["total_loss"], on_step=True, on_epoch=False, prog_bar=True)
         for loss_name, loss_val in loss_dict.items():
             if loss_name != "total_loss":
@@ -395,8 +433,8 @@ class Inkler(pl.LightningModule):
             except:
                 break
             topology = get_stroke_topology(
-                n_strokes=self.n_strokes if self.consistent_hierarchy else self.n_strokes * 2**(level + 2),
-                n_connect=3 + level if self.consistent_hierarchy else 5,
+                n_strokes=self.n_strokes if self.consistent_hierarchy else self.n_strokes * 2 ** (level + 2),
+                n_connect=self.n_connect,
                 use_connector_stroke=True,
             )
             # rendered_glyph = (self.renderer(glyph, topology) > .5).float()

@@ -1,7 +1,8 @@
 from typing import Tuple
 import torch
+from torch.nn import functional as F
 
-from inkler.utils import index_reduce_mps, canonical_mask
+from inkler.utils import index_reduce_mps, canonical_mask, child_order_within_parent
 from inkler.constants import BUCKETS
 
 
@@ -32,13 +33,20 @@ class Pooler(torch.nn.Module):
             self,
             d_model: int,
             pooling: str = "amax",
+            min_logsumexp: float = 1e-6,
+            min_temperature: float = .05,
+            max_temperature: float = 10.
     ):
         super(Pooler, self).__init__()
         self.d_model = d_model
-        if pooling.lower() not in ["mean", "amax", "prod", "amin"]:
+        if pooling.lower() not in ["mean", "amax", "prod", "amin", "logmeanexp"]:
             raise ValueError("pooling not understood.")
 
         self.pooling = pooling.lower()
+        self.min_logsumexp = min_logsumexp
+        self.min_temperature = min_temperature
+        self.max_temperature = max_temperature
+        self.temperature = torch.nn.Parameter(torch.randn((1, 1, self.d_model)))
 
     def forward(
             self,
@@ -80,6 +88,14 @@ class Pooler(torch.nn.Module):
         ).reshape(-1, 1) * out_size
         collate_idx = torch.where(mask, document_id + add_idx, -1)
 
+        if self.pooling == "logmeanexp":
+            x_ = torch.exp(x_ / F.softplus(self.temperature).expand(x_.shape).clip(
+                min=self.min_temperature,
+                max=self.max_temperature
+            ))
+            pooling = "mean"
+        else:
+            pooling = self.pooling
         # collate data values over indices that are aggregated over hierarchical document ids + offset,
         # index_reduce_mps is an mps-friendly implementation of the index_reduce tensor function
         t_, out_idx = index_reduce_mps(
@@ -87,79 +103,68 @@ class Pooler(torch.nn.Module):
             dim=0,
             index=collate_idx.flatten(),
             source=x_.reshape(-1, x_dim),
-            reduce=self.pooling,
+            reduce=pooling,
             include_self=False,
             mask=mask.flatten(),
         )
         # reshape
         t_ = t_.reshape(batch_size, out_size, x_dim)
+        if self.pooling == "logmeanexp":
+            log_mask = t_ > self.min_logsumexp
+            t_ = torch.where(
+                log_mask,
+                t_.clip(min=self.min_logsumexp).log() * F.softplus(self.temperature).clip(
+                    min=self.min_temperature,
+                    max=self.max_temperature
+                ),
+                torch.zeros_like(t_)
+            )
 
-        if out_idx is not None:
-            # Convert flattened [batch, position] back to per-example position.
-            valid_indices = out_idx < seq_len * batch_size
-            out_idx = torch.where(valid_indices, out_idx % seq_len, torch.full_like(out_idx, -1))
-            out_idx = out_idx.reshape(batch_size, -1, x_dim)
-
-        return t_, new_mask, out_idx
+        # avoid gradient flow from out_idx into reconstruction
+        return t_, new_mask.detach(), out_idx.detach() if out_idx is not None else None
 
 
 class Unpooler(torch.nn.Module):
     def __init__(
             self,
             d_model: int,
-            init_shift: float = -10.
+            init_shift: float = -10.,
+            max_children: int = 50000,
+            dropout: float = 0.25,
     ):
         super().__init__()
         self.d_model = d_model
+        self.max_children = max_children
         self.token = torch.nn.Parameter(torch.randn((1, self.d_model)) + init_shift)
+        self.pos_emb = torch.nn.Embedding(max_children, d_model)
+        self.dropout = torch.nn.Dropout(p=dropout)
 
     def forward(
             self,
             pooled: torch.Tensor,
             seq_len: int,
-            max_indices: torch.Tensor | None = None,
+            hierarchy_idx: torch.Tensor,
             mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size, out_size, x_dim = pooled.shape
+        hierarchy_idx = hierarchy_idx.reshape(batch_size, seq_len)
+        hierarchy_idx = hierarchy_idx.to(torch.int64)
+        child_order = child_order_within_parent(hierarchy_idx)
+        child_order = child_order.to(torch.int64)
+        valid = (hierarchy_idx >= 0) & ~mask
 
-        if max_indices is None:
-            max_indices = torch.arange(seq_len, device=pooled.device).unsqueeze(0).expand(pooled.shape)
+        # route invalid entries to index 0 instead of boolean indexing (MPS-friendly)
+        zeros = torch.zeros_like(hierarchy_idx)
+        safe_parent = torch.where(valid, hierarchy_idx, zeros)
+        safe_rank = torch.where(valid, child_order, zeros).clamp(max=self.pos_emb.num_embeddings - 1)
 
-        if max_indices.shape != pooled.shape:
-            raise ValueError(
-                f"max_indices must have shape {pooled.shape}, "
-                f"got {max_indices.shape}"
-            )
+        # broadcast each parent vector to all of its children, then add structural position
+        out = pooled.reshape(-1, x_dim)[
+              safe_parent.flatten()
+          ].reshape(batch_size, seq_len, x_dim) + self.dropout(self.pos_emb(safe_rank))
 
-        max_indices = max_indices.to(torch.int64)
-
-        # source positions into flattened output positions.
-        batch_offset = torch.arange(batch_size, device=pooled.device).reshape(batch_size, 1, 1) * seq_len
-        flat_target = max_indices + batch_offset
-        valid = max_indices >= 0 & ~mask.unsqueeze(-1)
-
-        # Add one garbage row so masked/invalid entries don't need boolean indexing
-        # (important for MPS-oriented implementation).
-        garbage = batch_size * seq_len
-        flat_target = torch.where(
-            valid,
-            flat_target,
-            torch.full_like(flat_target, garbage),
-        )
-
-        # important for amax cos only scattered to original position
-        out_flat = torch.ones((batch_size * seq_len + 1, x_dim), device=pooled.device, dtype=pooled.dtype,) * self.token
-        # scatter to original position, if amax only one position
-        out_flat = torch.scatter(
-            out_flat,
-            dim=0,
-            index=flat_target.reshape(-1, x_dim),
-            src=pooled.reshape(-1, x_dim),
-        )
-
-
-        # remove garbage
-        return out_flat[: batch_size * seq_len].reshape(batch_size, seq_len, x_dim)
+        # padding / invalid positions get the learned token
+        return torch.where(valid.unsqueeze(-1), out, self.token.to(out.dtype))
 
 
 class XCA(torch.nn.Module):

@@ -30,7 +30,13 @@ def keep_first_true_per_row(matrix: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def get_stroke_topology(n_strokes: int = 16, n_block: int = 0, use_connector_stroke: bool = False, n_connect: int = 5) -> torch.Tensor:
+def get_stroke_topology(
+        n_strokes: int = 16,
+        n_block: int = 0,
+        use_connector_stroke: bool = False,
+        n_connect: int = 5,
+        symmetric: bool = False,
+) -> torch.Tensor:
     if n_block < 2:
         topology_mat = torch.triu(torch.ones_like(torch.eye(n_strokes, dtype=torch.int)), diagonal=-n_connect)
     else:
@@ -49,6 +55,8 @@ def get_stroke_topology(n_strokes: int = 16, n_block: int = 0, use_connector_str
             topology_mat[0, :n_connect] = 1.
 
     topology_mat = keep_first_true_per_row(topology_mat)
+    if symmetric:
+        topology_mat = (topology_mat + topology_mat.T + torch.eye(n_strokes, dtype=torch.int)).clip(min=0., max=1.)
     return topology_mat
 
 

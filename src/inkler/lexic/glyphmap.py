@@ -57,12 +57,17 @@ class LexicInklerGlyph(torch.nn.Module):
             torch.nn.GELU(),
             torch.nn.Linear(256, self.n_strokes * (len(LEXIC) + len(PROPERTIES)))
         )
-        self.temperature = 1.0
+        self.register_buffer("temperature", torch.tensor(1.))
 
     def forward(self, z):
+        batch_size, seq_len = z.shape[:2]
         theta = self.net(z).view(-1, self.n_strokes, (len(LEXIC) + len(PROPERTIES)))
+        if self.training:
+            jitter = self.temperature * torch.randn_like(theta[..., :len(LEXIC)])
+        else:
+            jitter = torch.zeros_like(theta[..., :len(LEXIC)])
         # circle line hook activation
-        clh = (theta[..., :len(LEXIC)] + self.temperature * torch.randn_like(theta[..., :len(LEXIC)])).softmax(dim=-1)
+        clh = (theta[..., :len(LEXIC)] + jitter).softmax(dim=-1)
         properties = theta[..., len(LEXIC):]
         # position
         x = torch.tanh(properties[..., PROPERTIES["x"]]).unsqueeze(-1)
@@ -78,7 +83,7 @@ class LexicInklerGlyph(torch.nn.Module):
             y,
             scale,
             rotation
-        ], dim=-1)
+        ], dim=-1).reshape(batch_size, seq_len, self.n_strokes, -1)
 
 
 class LexicCharacterStrokes(AbstractGlyph):
@@ -110,6 +115,7 @@ class LexicCharacterStrokes(AbstractGlyph):
             **kwargs
     ):
         """parent_pos=parent_x, child_pos=child_x (B,S). Returns canvas-fitted points (B,S,N,2) in [-1,1]."""
+        batch_size, seq_len, line_len, n_feat = theta.shape
         if n_points is None:
             n_points = self.num_points
         primitive_probs = theta[..., :len(LEXIC)]
@@ -143,7 +149,6 @@ class LexicCharacterStrokes(AbstractGlyph):
             spoints = self._add_noise(spoints, n_points=n_points)
         spoints = scale_points(spoints)
         return spoints * (1 - self.margin)
-
 
 def hook_profile(num_points, device=None):
     """Heading of HOOK at uniform arc-length segment midpoints, plus its total arc length."""

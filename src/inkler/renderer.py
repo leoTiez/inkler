@@ -10,6 +10,9 @@ class GlyphRenderer(torch.nn.Module):
 
     def forward(self, points: torch.Tensor):
         """Soft rasterizer: points (B,S,N,2) -> ink (B,res,res). Small blur ~ hard render."""
+        if points.dim() > 4:
+            batch_size, seq_len = points.shape[:2]
+            points = points.reshape(batch_size * seq_len, *points.shape[2:])
         grid = torch.linspace(-1, 1, self.res, device=points.device)
         pixels = torch.stack(torch.meshgrid(grid, -grid, indexing='xy'), -1).reshape(-1, 2)
         seg_start = points[:, :, :-1].flatten(1, 2)

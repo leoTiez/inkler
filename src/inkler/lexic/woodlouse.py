@@ -32,16 +32,18 @@ class WoodlouseInklerGlyph(torch.nn.Module):
             torch.nn.GELU(),
             torch.nn.Linear(256, self.n_strokes * (len(DIRECTION) * 4 + len(PROPERTIES)))
         )
-        self.temperature = 1.
+        self.register_buffer("temperature", torch.tensor(1.))
 
     def forward(self, z):
+        batch_size, seq_len = z.shape[:2]
         theta = self.net(z).view(-1, self.n_strokes, (len(DIRECTION) * 4 + len(PROPERTIES)))
+        if self.training:
+            jitter = self.temperature * torch.randn_like(theta[..., :len(DIRECTION) * 4])
+        else:
+            jitter = torch.zeros_like(theta[..., :len(DIRECTION) * 4])
         # circle line hook activation
         n_theta = theta.shape[0]
-        direct = (
-                theta[..., :len(DIRECTION) * 4]
-                + self.temperature * torch.randn_like(theta[..., :len(DIRECTION) * 4])
-        ).reshape(
+        direct = (theta[..., :len(DIRECTION) * 4] + jitter).reshape(
             n_theta, self.n_strokes, -1, len(DIRECTION)
         ).softmax(dim=-1).reshape(-1, self.n_strokes, len(DIRECTION) * 4)
         properties = theta[..., -len(PROPERTIES):]
@@ -59,7 +61,7 @@ class WoodlouseInklerGlyph(torch.nn.Module):
             y,
             scale,
             rotation,
-        ], dim=-1)
+        ], dim=-1).reshape(batch_size, seq_len, self.n_strokes, -1)
 
 
 class WoodlouseCharacterStrokes(AbstractGlyph):
@@ -125,9 +127,9 @@ class WoodlouseCharacterStrokes(AbstractGlyph):
         """parent_pos=parent_x, child_pos=child_x (B,S). Returns canvas-fitted points (B,S,N,2) in [-1,1]."""
         if n_points is None:
             n_points = self.num_points
-        bs, seq_len = theta.shape[:2]
-        direct = theta[..., :len(DIRECTION) * 4].reshape(bs, seq_len, -1, len(DIRECTION))
-        properties = theta[..., -len(PROPERTIES):]
+        bs, seq_len, line_len, n_feat = theta.shape
+        direct = theta[..., :len(DIRECTION) * 4].reshape(bs * seq_len, line_len, -1, len(DIRECTION))
+        properties = theta[..., -len(PROPERTIES):].reshape(bs * seq_len, line_len, -1)
         parent_pos = properties[..., PROPERTIES["x"]]
         child_pos = properties[..., PROPERTIES["y"]]
         scale = properties[..., PROPERTIES["scale"]]
@@ -157,7 +159,7 @@ class WoodlouseCharacterStrokes(AbstractGlyph):
         if add_noise:
             spoints = self._add_noise(spoints, n_points=n_points)
         spoints = scale_points(spoints)
-        return spoints * (1 - self.margin)
+        return (spoints * (1 - self.margin)).reshape(bs, seq_len, *spoints.shape[1:])
 
 
 def interp(polyline, pos):  # point at pos in [-1,1] along polyline (B,N,2) -> (B,2), differentiable in pos
@@ -172,7 +174,8 @@ def interp(polyline, pos):  # point at pos in [-1,1] along polyline (B,N,2) -> (
 def woodlouse_contact_loss(points, topology, min_dist=0.06):
     """Penalize strokes i, j that come closer than min_dist (canvas units; 2*width = touching when
     rendered) where topology[i, j] is False. Every point inside the margin is pushed out."""
-    batch, num_strokes, num_points, _ = points.shape
+    batch, seq_len = points.shape[:2]
+    points = points.reshape(batch * seq_len, *points.shape[2:])
     no_interx, no_intery = torch.where((1. - topology).bool())
     sq_point_distance = (points[:, no_interx] - points[:, no_intery]).pow(2).sum(-1)
     dist_strokes = (sq_point_distance + 1e-12).sqrt().amin(-1)

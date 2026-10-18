@@ -319,6 +319,7 @@ class Inkler(pl.LightningModule):
                 n_strokes=self.n_strokes if self.consistent_hierarchy else self.n_strokes * 2**(level + 2),
                 n_connect=self.n_connect,
                 use_connector_stroke=True,
+                symmetric=True
             ).to(fwd_out["genre"].device)
             topology_e = topology_e + self.contact_loss(
                 fwd_out[f"stroke_{level}"],
@@ -432,8 +433,8 @@ class Inkler(pl.LightningModule):
             except:
                 break
             topology = get_stroke_topology(
-                n_strokes=self.n_strokes if self.consistent_hierarchy else self.n_strokes * 2**(level + 2),
-                n_connect=3 + level if self.consistent_hierarchy else 5,
+                n_strokes=self.n_strokes if self.consistent_hierarchy else self.n_strokes * 2 ** (level + 2),
+                n_connect=self.n_connect,
                 use_connector_stroke=True,
             )
             # rendered_glyph = (self.renderer(glyph, topology) > .5).float()

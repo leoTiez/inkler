@@ -139,6 +139,7 @@ class BookDataset:
             score_thresh: float | None = None,
             in_order: bool = False,
             n_cpu: int | None = None,
+            reset_after_completion: bool = False,
             device: int | str | torch.device = "cpu"
     ):
         if not isinstance(train_path, list):
@@ -181,6 +182,7 @@ class BookDataset:
         self.epoch = 0
         self.current_idx = 0
         self.device = device
+        self.reset_after_completion = reset_after_completion
         self.preload_book_entries()
 
     @property
@@ -190,10 +192,13 @@ class BookDataset:
         return self._doc_token
 
     def _reset(self):
+        if not self.reset_after_completion:
+            return False
         self.current_idx = 0
         self.epoch += 1
         if not self.in_order:
             np.random.shuffle(self.idx)
+        return True
 
     def _get_book_entry(self, i):
         future = self.pending_book_entries.pop(i)
@@ -205,7 +210,9 @@ class BookDataset:
     def preload_book_entries(self):
         while len(self.pending_book_entries) < self.preload_size:
             if self.current_idx >= len(self.book_entry_path_l):
-                self._reset()
+                reset = self._reset()
+                if not reset:
+                    return
             self.pending_book_entries.insert(
                 0,
                 self.pool.apply_async(_load, (self.book_entry_path_l[self.idx[self.current_idx]],))
@@ -231,6 +238,8 @@ class BookDataset:
 
     def __next__(self):
         results = []
+        if self.current_idx >= len(self.book_entry_path_l) and len(self.pending_book_entries) == 0:
+            raise StopIteration
         if self.in_order:
             for i_be in range(self.batch_size):
                 if self.current_idx >= len(self.book_entry_path_l):

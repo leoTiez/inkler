@@ -304,17 +304,21 @@ class Inkler(pl.LightningModule):
         recon_e = torch.tensor(0., device=fwd_out["genre"].device)
         dec_e = torch.tensor(0., device=fwd_out["genre"].device)
         topology_e = torch.tensor(0., device=fwd_out["genre"].device)
+        recon_e = recon_e + self.recon_loss(
+            fwd_out["recon_-1"][~fwd_out[f"deplex_mask_-1"]],
+            fwd_out["enc_-1"][~fwd_out[f"deplex_mask_-1"]].detach()
+        )
         for level in range(-1, fwd_out["n_levels"] - 1):  # shifted by 1
-            recon_e = recon_e + self.recon_loss(
-                fwd_out[f"recon_{level}"][~fwd_out[f"deplex_mask_{level}"]],
-                fwd_out[f"enc_{level}"][~fwd_out[f"deplex_mask_{level}"]].detach()
-            )
-            if level < fwd_out["n_levels"] - 2:  # one less decoding
-                # TODO is this loss still needed with the document glyph bottleneck?
-                dec_e = dec_e + self.dec_loss(
-                    fwd_out[f"dec_{level}"][~fwd_out[f"deplex_mask_{level}"]],
-                    fwd_out[f"enc_{level}"][~fwd_out[f"deplex_mask_{level}"]].detach()
-                )
+            # recon_e = recon_e + self.recon_loss(
+            #     fwd_out[f"recon_{level}"][~fwd_out[f"deplex_mask_{level}"]],
+            #     fwd_out[f"enc_{level}"][~fwd_out[f"deplex_mask_{level}"]].detach()
+            # )
+            # if level < fwd_out["n_levels"] - 2:  # one less decoding
+            #     # TODO is this loss still needed with the document glyph bottleneck?
+            #     dec_e = dec_e + self.dec_loss(
+            #         fwd_out[f"dec_{level}"][~fwd_out[f"deplex_mask_{level}"]],
+            #         fwd_out[f"enc_{level}"][~fwd_out[f"deplex_mask_{level}"]].detach()
+            #     )
             stroke_topology = get_stroke_topology(
                 n_strokes=self.n_strokes if self.consistent_hierarchy else self.n_strokes * 2**(level + 2),
                 n_connect=self.n_connect,
@@ -334,8 +338,8 @@ class Inkler(pl.LightningModule):
         ).sum()
         cosine_sim = cosine_sim.abs()
 
-        recon_e = recon_e / float(fwd_out["n_levels"])
-        dec_e = dec_e / float(fwd_out["n_levels"] - 1)
+        # recon_e = recon_e / float(fwd_out["n_levels"])
+        # dec_e = dec_e / float(fwd_out["n_levels"] - 1)
         topology_e = topology_e / float(fwd_out["n_levels"])
         postit_e = torch.tensor(0., device=fwd_out["genre"].device)
         if postits is not None:
@@ -425,8 +429,8 @@ class Inkler(pl.LightningModule):
             self.glyph_log_dir = os.path.join("/".join(self.logger.log_dir.split("/")[:-2]), "val_glyphs")
             Path(self.glyph_log_dir).mkdir(parents=True, exist_ok=True)
 
-        val_glyphs = {key: val for key, val in result_dict.items() if "glyph"
-                      in key and int(key.split("_")[-1]) == self.n_hierarchy - 1}
+        val_glyphs = {key: val for key, val in result_dict.items()
+                      if "glyph" in key and int(key.split("_")[-1]) == self.n_hierarchy - 1}
         for glyph_level, glyph in val_glyphs.items():
             try:
                 level = int(glyph_level.replace("glyph_", ""))
@@ -439,17 +443,16 @@ class Inkler(pl.LightningModule):
             )
             # rendered_glyph = (self.renderer(glyph, topology) > .5).float()
             pg = self.character(glyph, topology=topology, n_points=64)
-            rendered_glyph = (self.renderer(pg) > .5).float()
-            for i_glyph, rg in enumerate(rendered_glyph):
+            for i_glyph, rg in enumerate(pg):
                 save_name = f"{"_".join(batch["titles"][i_glyph].split(" "))}_BY_{
                     "_".join(batch["authors"][i_glyph].split(" "))}_epoch_{self.val_step}.png"
                 fig, ax = plt.subplots(1, 1, figsize=(2, 2))
-                ax.imshow(rg.detach().cpu().numpy(), aspect="auto", cmap="gray_r", interpolation="none")
+                ax.plot(*rg[0].permute(2, 1, 0).detach().cpu().numpy(), color="black")
                 ax.axis("off")
                 fig.tight_layout()
                 fig.savefig(f"{self.glyph_log_dir}/{save_name}")
                 plt.close(fig)
-            del rendered_glyph
+            del pg
         plt.close("all")
         return loss["total_loss"]
 

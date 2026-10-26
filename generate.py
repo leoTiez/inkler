@@ -117,27 +117,24 @@ def main(args):
                         n_connect=model.n_connect,
                         use_connector_stroke=True,
                     )
-                    if level < 1:
-                        continue
                     pg = model.character(glyph, topology=topology, n_points=n_points)
                     for i_gfd, glyph_for_drawing in enumerate(pg.transpose(0, 1)):
                         if not (~batch["masks"].bool())[0, i_gfd]:
                             logger.info(f"Finished drawing level {LEVEL_NAMES[level]}")
                             break
-                        rendered_glyph = (model.renderer(glyph_for_drawing[None]) > .5).float()
-                        for i_glyph, rg in enumerate(rendered_glyph):
+                        for i_glyph, rg in enumerate(glyph_for_drawing):
                             glyph_out =  f"{"_".join(batch["titles"][i_glyph].split(" "))}_BY_{
                                 "_".join(batch["authors"][i_glyph].split(" "))}"
                             Path(os.path.join(out_dir, glyph_out)).mkdir(parents=True, exist_ok=True)
                             save_name = f"level_{LEVEL_NAMES[level]}_{i_gfd}.svg"
-                            fig, ax = plt.subplots(1, 1, figsize=(4, 4))
-                            ax.imshow(rg.detach().cpu().numpy(), aspect="auto", cmap="gray_r", interpolation="none")
+                            fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+                            ax.plot(*rg.permute(2, 1, 0).detach().cpu().numpy(), color="black")
                             ax.axis("off")
                             fig.tight_layout()
                             fig.savefig(f"{out_dir}/{glyph_out}/{save_name}")
                             plt.close(fig)
                         # clear
-                        del rendered_glyph
+                        del glyph_for_drawing
                 plt.close("all")
 
 

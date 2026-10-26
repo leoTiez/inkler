@@ -389,6 +389,7 @@ class StructuralDocumentProcessor(torch.nn.Module):
         x = (x - x.mean(dim=-1, keepdim=True)) / torch.where(x_std > 0, x_std, torch.ones_like(x_std))
         self._update_sentence_ema(x, attention_mask.bool())
         x = x - self.ema_sentence
+        init_x = x.clone()
         level_dict, deplex_idx, deplex_hid, deplex_mask = None, None, None, None
         for i_block, sdp_block in enumerate(self.sdp_blocks):
             # x is new sentence embedding, hierarchy_x is new class token
@@ -400,7 +401,7 @@ class StructuralDocumentProcessor(torch.nn.Module):
                 mask_hierarchy=i_block == 0
             )
 
-        level_dict[-1] = x.clone()
+        level_dict[-1] = init_x.clone()
         document_key = max(level_dict.keys())
         batch_size = hierarchy_x.shape[0]
         self._update_document_ema(hierarchy_x, torch.zeros(batch_size, 1, dtype=torch.bool, device=x.device))

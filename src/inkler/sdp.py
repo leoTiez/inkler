@@ -303,13 +303,14 @@ class SDPDecoderBlock(torch.nn.Module):
             attn_mask = deplex_mask[i_d - 1]
             seq_len = demulidx.shape[0] // batch_size
 
-            x = self.skip_norm_pre(encode_x[i_d] + x)
             deplex_x = self.unpool(
                 pooled=x,
                 seq_len=seq_len,
                 hierarchy_idx=demulidx,
                 mask=attn_mask
             )
+            if i_d >= 0:
+                deplex_x = self.skip_norm_pre(encode_x[i_d - 1]) + deplex_x
             # hierarchy attention
             x = st_layer(deplex_x, hierarchy_x, attn_mask, mask_hierarchy=mask_hierarchy)
             decode_x.append(x.clone())

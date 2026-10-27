@@ -26,9 +26,11 @@ class WoodlouseInklerGlyph(torch.nn.Module):
         super().__init__()
         self.n_strokes = n_strokes
         self.net = torch.nn.Sequential(
-            torch.nn.Linear(d_model, 128),
+            torch.nn.Linear(d_model, 1024),
             torch.nn.GELU(),
-            torch.nn.Linear(128, 256),
+            torch.nn.Linear(1024, 512),
+            torch.nn.GELU(),
+            torch.nn.Linear(512, 256),
             torch.nn.GELU(),
             torch.nn.Linear(256, self.n_strokes * (len(DIRECTION) * 4 + len(PROPERTIES)))
         )
@@ -73,7 +75,6 @@ class WoodlouseCharacterStrokes(AbstractGlyph):
             noise: float = .05,
             n_noise_knots: int = 6,
             smooth: int = 11,
-            snap: float = 1.,
             **kwargs
     ):
         super().__init__(
@@ -85,7 +86,7 @@ class WoodlouseCharacterStrokes(AbstractGlyph):
         self.min_scale = min_scale
         self.register_buffer("smooth", torch.ones(smooth) / float(smooth))
         self.register_buffer("direction_vector", torch.tensor([-1, 0, 1]))
-        self.snap = snap
+        self.register_buffer("snap", torch.tensor(0.))
 
     def _smooth(self, points: torch.Tensor) -> torch.Tensor:
         x_ = torch.nn.functional.pad(

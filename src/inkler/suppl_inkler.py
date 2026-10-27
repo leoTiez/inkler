@@ -74,11 +74,11 @@ class GlyphDecoder(torch.nn.Module):
     def __init__(self, n_size=32, n_params: int = 9, d_model=384, act_thresh: float = .5):
         super().__init__()
         self.net = torch.nn.Sequential(
-            torch.nn.Linear(n_size * n_params, 256),
+            torch.nn.Linear(n_size * n_params, 512),
             torch.nn.GELU(),
-            torch.nn.Linear(256, 256),
+            torch.nn.Linear(512, 512),
             torch.nn.GELU(),
-            torch.nn.Linear(256, d_model)
+            torch.nn.Linear(512, d_model)
         )
         self.act_thresh = act_thresh
 

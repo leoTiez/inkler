@@ -33,9 +33,9 @@ class Pooler(torch.nn.Module):
             self,
             d_model: int,
             pooling: str = "amax",
-            min_logsumexp: float = 1e-6,
+            min_logsumexp: float = 1e-5,
             min_temperature: float = .05,
-            max_temperature: float = 10.
+            max_temperature: float = 4.
     ):
         super(Pooler, self).__init__()
         self.d_model = d_model
@@ -130,7 +130,7 @@ class Unpooler(torch.nn.Module):
             d_model: int,
             init_shift: float = -10.,
             max_children: int = 50000,
-            dropout: float = 0.25,
+            dropout: float = 0.0,
     ):
         super().__init__()
         self.d_model = d_model
@@ -161,7 +161,7 @@ class Unpooler(torch.nn.Module):
         # broadcast each parent vector to all of its children, then add structural position
         out = pooled.reshape(-1, x_dim)[
               safe_parent.flatten()
-          ].reshape(batch_size, seq_len, x_dim) + self.dropout(self.pos_emb(safe_rank))
+        ].reshape(batch_size, seq_len, x_dim) + self.dropout(self.pos_emb(safe_rank))
 
         # padding / invalid positions get the learned token
         return torch.where(valid.unsqueeze(-1), out, self.token.to(out.dtype))

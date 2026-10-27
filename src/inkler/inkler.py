@@ -53,7 +53,7 @@ class Inkler(pl.LightningModule):
             cosine_weight: float = 1.,
             genre_weight: float = .1,
             sparsity_weight: float = 0.05,
-            sig_weight: float = 0.2,
+            stroke_weight: float = 1.,
             max_norm: float = 1.,
             annealing: float = .001,
             n_eval_points: int = 32,
@@ -166,7 +166,7 @@ class Inkler(pl.LightningModule):
         self.decode_w = decode_weight
         self.topology_w = topology_weight
         self.cosine_w = cosine_weight
-        self.sig = sig_weight
+        self.stroke_w = stroke_weight
         self.max_norm = max_norm
         self.annealing = annealing
         self.class_loss = torch.nn.BCELoss(reduction="mean")
@@ -307,11 +307,14 @@ class Inkler(pl.LightningModule):
         recon_e = torch.tensor(0., device=fwd_out["genre"].device)
         dec_e = torch.tensor(0., device=fwd_out["genre"].device)
         topology_e = torch.tensor(0., device=fwd_out["genre"].device)
+        stroke_sim = torch.tensor(0., device=fwd_out["genre"].device)
         recon_e = recon_e + self.recon_loss(
             fwd_out["recon_-1"][~fwd_out[f"deplex_mask_-1"]],
             fwd_out["enc_-1"][~fwd_out[f"deplex_mask_-1"]].detach()
         ).sum(dim=-1).mean()
         for level in range(-1, fwd_out["n_levels"] - 1):  # shifted by 1
+            stroke_sim = stroke_sim + torch.exp(
+                -torch.linalg.norm(fwd_out[f"glyph_{level}"][~fwd_out[f"deplex_mask_{level}"]], dim=0).mean())
             # recon_e = recon_e + self.recon_loss(
             #     fwd_out[f"recon_{level}"][~fwd_out[f"deplex_mask_{level}"]],
             #     fwd_out[f"enc_{level}"][~fwd_out[f"deplex_mask_{level}"]].detach()
@@ -334,12 +337,11 @@ class Inkler(pl.LightningModule):
             )
         norm_doc_x = fwd_out["document_x"] / torch.norm(fwd_out["document_x"], dim=-1, keepdim=True)
         batch_size = norm_doc_x.shape[0]
-        cosine_sim = (norm_doc_x.squeeze(1) @ norm_doc_x.squeeze(1).transpose(-1, -2)).triu(1).sum() / torch.arange(
+        cosine_sim = (norm_doc_x.squeeze(1) @ norm_doc_x.squeeze(1).transpose(-1, -2)).triu(1).sum().abs() / torch.arange(
             batch_size,
             dtype=torch.float,
             device=self.device
-        ).mean()
-        cosine_sim = cosine_sim.abs()
+        ).sum()
 
         # recon_e = recon_e / float(fwd_out["n_levels"])
         # dec_e = dec_e / float(fwd_out["n_levels"] - 1)
@@ -365,6 +367,7 @@ class Inkler(pl.LightningModule):
             "decoder_loss": dec_e,
             "topology_loss": topology_e,
             "document_cosine_sim": cosine_sim,
+            "stroke_sim": stroke_sim,
             "total_loss": (
                     self.genre_w * genre_e
                     + self.postit_w * postit_e
@@ -372,6 +375,7 @@ class Inkler(pl.LightningModule):
                     + self.decode_w * dec_e
                     + self.topology_w * topology_e
                     + self.cosine_w * cosine_sim
+                    + self.stroke_w * stroke_sim
             )
         }
 
@@ -400,6 +404,8 @@ class Inkler(pl.LightningModule):
 
         if hasattr(self.inkler_glyph, "temperature"):
             self.inkler_glyph.temperature = torch.exp(-self.train_step * self.annealing)
+        if hasattr(self.character, "snap"):
+            self.character.snap = 1. - torch.exp(-self.train_step * self.annealing)
         self.log(name="train_loss", value=loss_dict["total_loss"], on_step=True, on_epoch=False, prog_bar=True)
         for loss_name, loss_val in loss_dict.items():
             if loss_name != "total_loss":

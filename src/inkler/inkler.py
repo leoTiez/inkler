@@ -314,17 +314,13 @@ class Inkler(pl.LightningModule):
         ).sum(dim=-1).mean()
         for level in range(-1, fwd_out["n_levels"] - 1):  # shifted by 1
             stroke_sim = stroke_sim + torch.exp(
-                -torch.linalg.norm(fwd_out[f"glyph_{level}"][~fwd_out[f"deplex_mask_{level}"]], dim=0).mean())
-            # recon_e = recon_e + self.recon_loss(
-            #     fwd_out[f"recon_{level}"][~fwd_out[f"deplex_mask_{level}"]],
-            #     fwd_out[f"enc_{level}"][~fwd_out[f"deplex_mask_{level}"]].detach()
-            # )
-            # if level < fwd_out["n_levels"] - 2:  # one less decoding
-            #     # TODO is this loss still needed with the document glyph bottleneck?
-            #     dec_e = dec_e + self.dec_loss(
-            #         fwd_out[f"dec_{level}"][~fwd_out[f"deplex_mask_{level}"]],
-            #         fwd_out[f"enc_{level}"][~fwd_out[f"deplex_mask_{level}"]].detach()
-            #     )
+                -torch.linalg.norm(fwd_out[f"glyph_{level}"][~fwd_out[f"deplex_mask_{level}"]], dim=0).mean()
+            )
+            recon_e = recon_e + self.recon_loss(
+                fwd_out[f"recon_{level}"][~fwd_out[f"deplex_mask_{level}"]],
+                fwd_out[f"enc_{level}"][~fwd_out[f"deplex_mask_{level}"]].detach()
+            )
+
             stroke_topology = get_stroke_topology(
                 n_strokes=self.n_strokes if self.consistent_hierarchy else self.n_strokes * 2**(level + 2),
                 n_connect=self.n_connect,

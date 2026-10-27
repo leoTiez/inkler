@@ -54,6 +54,7 @@ class Inkler(pl.LightningModule):
             genre_weight: float = .1,
             sparsity_weight: float = 0.05,
             sig_weight: float = 0.2,
+            max_norm: float = 1.,
             annealing: float = .001,
             n_eval_points: int = 32,
             consistent_hierarchy: bool = False,
@@ -166,9 +167,10 @@ class Inkler(pl.LightningModule):
         self.topology_w = topology_weight
         self.cosine_w = cosine_weight
         self.sig = sig_weight
+        self.max_norm = max_norm
         self.annealing = annealing
         self.class_loss = torch.nn.BCELoss(reduction="mean")
-        self.recon_loss = torch.nn.MSELoss(reduction="mean")
+        self.recon_loss = torch.nn.MSELoss(reduction="none")
         self.dec_loss = torch.nn.MSELoss(reduction="mean")
         self.glyph_log_dir = None
         self.register_buffer("val_step", torch.tensor(-1.))
@@ -253,6 +255,7 @@ class Inkler(pl.LightningModule):
 
         decode_x = self.inkler_decoder(
             x=glyph_decoder[f"recon_{self.n_hierarchy - 1}"],
+            encode_x=level_dict,
             deplex_idx=deplex_idx,
             deplex_mask=deplex_mask,
             hierarchy_x=self.doc_token.expand(x_sentence.shape[0], -1, -1),
@@ -307,7 +310,7 @@ class Inkler(pl.LightningModule):
         recon_e = recon_e + self.recon_loss(
             fwd_out["recon_-1"][~fwd_out[f"deplex_mask_-1"]],
             fwd_out["enc_-1"][~fwd_out[f"deplex_mask_-1"]].detach()
-        )
+        ).sum(dim=-1).mean()
         for level in range(-1, fwd_out["n_levels"] - 1):  # shifted by 1
             # recon_e = recon_e + self.recon_loss(
             #     fwd_out[f"recon_{level}"][~fwd_out[f"deplex_mask_{level}"]],
@@ -335,7 +338,7 @@ class Inkler(pl.LightningModule):
             batch_size,
             dtype=torch.float,
             device=self.device
-        ).sum()
+        ).mean()
         cosine_sim = cosine_sim.abs()
 
         # recon_e = recon_e / float(fwd_out["n_levels"])
@@ -455,6 +458,14 @@ class Inkler(pl.LightningModule):
             del pg
         plt.close("all")
         return loss["total_loss"]
+
+    def on_before_optimizer_step(self, optimizer) -> None:
+        total_norm = torch.nn.utils.clip_grad_norm_(
+            parameters=self.parameters(),
+            max_norm=self.max_norm,
+            norm_type=2.0
+        )
+        self.log("grad_norm", total_norm, on_step=True, on_epoch=False)
 
     @torch.no_grad()
     def on_validation_epoch_start(self):

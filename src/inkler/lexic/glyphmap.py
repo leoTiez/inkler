@@ -104,7 +104,7 @@ class LexicCharacterStrokes(AbstractGlyph):
         )
         self.num_points = num_points
         self.min_scale = min_scale
-        self.snap = snap
+        self.register_buffer("snap", torch.tensor(0.))
 
     def forward(
             self,
@@ -118,13 +118,14 @@ class LexicCharacterStrokes(AbstractGlyph):
         batch_size, seq_len, line_len, n_feat = theta.shape
         if n_points is None:
             n_points = self.num_points
-        primitive_probs = theta[..., :len(LEXIC)]
-        properties = theta[..., len(LEXIC):]
+        primitive_probs = theta[..., :len(LEXIC)].reshape(batch_size * seq_len, line_len, len(LEXIC))
+        properties = theta[..., len(LEXIC):].reshape(batch_size * seq_len, line_len, -1)
         parent_pos = properties[..., PROPERTIES["x"]]
         child_pos = properties[..., PROPERTIES["y"]]
         scale = properties[..., PROPERTIES["scale"]]
         scale = scale.masked_fill(scale < self.min_scale, 0.)
         rotation = properties[..., PROPERTIES["rotation"]]
+
         parent_idx = parents(topology)
         local_curves, strokes = shapes(primitive_probs, scale, rotation, n_points, snap=self.snap), []
         for k, parent in enumerate(parent_idx):
@@ -148,7 +149,7 @@ class LexicCharacterStrokes(AbstractGlyph):
         if add_noise:
             spoints = self._add_noise(spoints, n_points=n_points)
         spoints = scale_points(spoints)
-        return spoints * (1 - self.margin)
+        return (spoints * (1 - self.margin)).reshape(batch_size, seq_len, *spoints.shape[1:])
 
 def hook_profile(num_points, device=None):
     """Heading of HOOK at uniform arc-length segment midpoints, plus its total arc length."""
@@ -188,7 +189,8 @@ def interp(polyline, pos):  # point at pos in [-1,1] along polyline (B,N,2) -> (
 def lexic_contact_loss(points, topology, min_dist=0.06):
     """Penalize strokes i, j that come closer than min_dist (canvas units; 2*width = touching when
     rendered) where topology[i, j] is False. Every point inside the margin is pushed out."""
-    batch, num_strokes, num_points, _ = points.shape
+    batch, seq_len = points.shape[:2]
+    points = points.reshape(batch * seq_len, *points.shape[2:])
     no_interx, no_intery = torch.where((1. - topology).bool())
     sq_point_distance = (points[:, no_interx] - points[:, no_intery]).pow(2).sum(-1)
     dist_strokes = (sq_point_distance + 1e-12).sqrt().amin(-1)

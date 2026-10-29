@@ -26,9 +26,9 @@ class WoodlouseInklerGlyph(torch.nn.Module):
         super().__init__()
         self.n_strokes = n_strokes
         self.net = torch.nn.Sequential(
-            torch.nn.Linear(d_model, 1024),
+            torch.nn.Linear(d_model, 512),
             torch.nn.GELU(),
-            torch.nn.Linear(1024, 512),
+            torch.nn.Linear(512, 512),
             torch.nn.GELU(),
             torch.nn.Linear(512, 256),
             torch.nn.GELU(),

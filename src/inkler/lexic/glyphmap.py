@@ -48,7 +48,7 @@ HOOK = torch.tensor([
 
 
 class LexicInklerGlyph(torch.nn.Module):
-    def __init__(self, d_model=384, n_strokes=16, logit_scale: float = 4.):
+    def __init__(self, d_model=384, n_strokes=16):
         super().__init__()
         self.n_strokes = n_strokes
         self.net = torch.nn.Sequential(
@@ -58,7 +58,7 @@ class LexicInklerGlyph(torch.nn.Module):
             torch.nn.GELU(),
             torch.nn.Linear(256, self.n_strokes * (len(LEXIC) + len(PROPERTIES)))
         )
-        self.logit_scale = logit_scale
+        self.logit_scale = len(LEXIC)
         self.register_buffer("temperature", torch.tensor(1.))
 
     def forward(self, z):

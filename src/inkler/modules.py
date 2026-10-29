@@ -34,7 +34,7 @@ class Pooler(torch.nn.Module):
             d_model: int,
             pooling: str = "amax",
             min_logsumexp: float = 1e-5,
-            min_temperature: float = .05,
+            min_temperature: float = .1,
             max_temperature: float = 5.
     ):
         super(Pooler, self).__init__()
@@ -258,7 +258,7 @@ class EMA(torch.nn.Module):
         self.ema_weight = ema_weight
         self.register_buffer("is_ema_set", torch.tensor(0.))
         self.register_buffer("ema", torch.zeros((1, 1, self.d_model)))
-        self.register_buffer("ema_var", torch.ones((1, 1, self.d_model)))
+        self.register_buffer("ema_std", torch.ones((1, 1, self.d_model)))
 
     @staticmethod
     def _update_ema(x: torch.Tensor, ema: torch.Tensor, mask: torch.Tensor, ema_weight: float):
@@ -266,9 +266,9 @@ class EMA(torch.nn.Module):
         return ema * ema_weight + (1 - ema_weight) * x[~mask].reshape(-1, feat_dim).mean(0, keepdim=True).unsqueeze(0)
 
     @staticmethod
-    def _update_ema_var(x: torch.Tensor, ema: torch.Tensor, mask: torch.Tensor, ema_weight: float):
+    def _update_ema_std(x: torch.Tensor, ema: torch.Tensor, mask: torch.Tensor, ema_weight: float):
         feat_dim = x.shape[-1]
-        return ema * ema_weight + (1 - ema_weight) * x[~mask].reshape(-1, feat_dim).var(0, keepdim=True).unsqueeze(0)
+        return ema * ema_weight + (1 - ema_weight) * x[~mask].reshape(-1, feat_dim).std(0, keepdim=True).unsqueeze(0)
 
     @torch.no_grad()
     def _update_distribution(self, x: torch.Tensor, mask: torch.Tensor):
@@ -276,9 +276,9 @@ class EMA(torch.nn.Module):
             ema_weight = self.ema_weight if (self.is_ema_set == 1.).all() else 0.
             self.is_ema_set = torch.tensor(1.).to(x.device)
             self.ema = self._update_ema(x, self.ema, mask, ema_weight)
-            self.ema_var = self._update_ema_var(x, self.ema_var, mask, ema_weight).clip(min=self.var_min)
+            self.ema_std = self._update_ema_std(x, self.ema_std, mask, ema_weight).clip(min=self.var_min)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        x_ = (x - self.ema) / self.ema_var
+        x_ = (x - self.ema) / self.ema_std
         self._update_distribution(x_, mask.bool())
         return x_

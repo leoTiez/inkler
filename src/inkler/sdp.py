@@ -249,7 +249,7 @@ class SDPEncoderBlock(torch.nn.Module):
                 input=agg_,
                 dim=0,
                 index=collate_idx.flatten(),
-                source=out_embedding[i_d - 1].reshape(-1, self.d_model).detach(),
+                source=out_agg[f"agg_{i_d - 1}"].reshape(-1, self.d_model).detach(),
                 reduce="mean",
                 include_self=False,
                 mask=~deplex_mask[i_d - 1].flatten(),

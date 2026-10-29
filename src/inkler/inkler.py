@@ -417,10 +417,16 @@ class Inkler(pl.LightningModule):
         )
         utils.log_mps_memory("After loss calculation", device=self.device.type)
 
-        if hasattr(self.inkler_glyph, "temperature"):
-            self.inkler_glyph.temperature = torch.exp(-self.train_step * self.annealing)
-        if hasattr(self.character, "snap"):
-            self.character.snap = 1. - torch.exp(-self.train_step * self.annealing)
+        if hasattr(self.inkler_glyph[0], "temperature"):
+            for iglyph in range(len(self.inkler_glyph)):
+                self.inkler_glyph[iglyph].temperature = torch.exp(-self.train_step * self.annealing)
+            self.log(
+                name="temperature",
+                value=self.inkler_glyph[0].temperature.item(),
+                on_step=True,
+                on_epoch=False,
+                prog_bar=True
+            )
         self.log(name="train_loss", value=loss_dict["total_loss"], on_step=True, on_epoch=False, prog_bar=True)
         for loss_name, loss_val in loss_dict.items():
             if loss_name != "total_loss":

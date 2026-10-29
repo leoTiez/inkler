@@ -1,4 +1,5 @@
 import torch
+from torch.nn import functional as F
 from math import pi
 from torch.distributions.utils import probs_to_logits
 
@@ -47,7 +48,7 @@ HOOK = torch.tensor([
 
 
 class LexicInklerGlyph(torch.nn.Module):
-    def __init__(self, d_model=384, n_strokes=16):
+    def __init__(self, d_model=384, n_strokes=16, logit_scale: float = 4.):
         super().__init__()
         self.n_strokes = n_strokes
         self.net = torch.nn.Sequential(
@@ -57,6 +58,7 @@ class LexicInklerGlyph(torch.nn.Module):
             torch.nn.GELU(),
             torch.nn.Linear(256, self.n_strokes * (len(LEXIC) + len(PROPERTIES)))
         )
+        self.logit_scale = logit_scale
         self.register_buffer("temperature", torch.tensor(1.))
 
     def forward(self, z):
@@ -67,7 +69,8 @@ class LexicInklerGlyph(torch.nn.Module):
         else:
             jitter = torch.zeros_like(theta[..., :len(LEXIC)])
         # circle line hook activation
-        clh = (theta[..., :len(LEXIC)] + jitter).softmax(dim=-1)
+        logit = F.normalize(theta[..., :len(LEXIC)], dim=-1) * self.logit_scale
+        clh = (logit + jitter).softmax(dim=-1)
         properties = theta[..., len(LEXIC):]
         # position
         x = torch.tanh(properties[..., PROPERTIES["x"]]).unsqueeze(-1)
@@ -104,7 +107,7 @@ class LexicCharacterStrokes(AbstractGlyph):
         )
         self.num_points = num_points
         self.min_scale = min_scale
-        self.register_buffer("snap", torch.tensor(0.))
+        self.register_buffer("snap", torch.tensor(snap))
 
     def forward(
             self,

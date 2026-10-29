@@ -22,18 +22,17 @@ PROPERTIES = {
 
 
 class WoodlouseInklerGlyph(torch.nn.Module):
-    def __init__(self, d_model=384, n_strokes=16):
+    def __init__(self, d_model=384, n_strokes=16, logit_scale: float = 4.):
         super().__init__()
         self.n_strokes = n_strokes
         self.net = torch.nn.Sequential(
-            torch.nn.Linear(d_model, 512),
+            torch.nn.Linear(d_model, 128),
             torch.nn.GELU(),
-            torch.nn.Linear(512, 512),
-            torch.nn.GELU(),
-            torch.nn.Linear(512, 256),
+            torch.nn.Linear(128, 256),
             torch.nn.GELU(),
             torch.nn.Linear(256, self.n_strokes * (len(DIRECTION) * 4 + len(PROPERTIES)))
         )
+        self.logit_scale = logit_scale
         self.register_buffer("temperature", torch.tensor(1.))
 
     def forward(self, z):
@@ -45,7 +44,8 @@ class WoodlouseInklerGlyph(torch.nn.Module):
             jitter = torch.zeros_like(theta[..., :len(DIRECTION) * 4])
         # circle line hook activation
         n_theta = theta.shape[0]
-        direct = (theta[..., :len(DIRECTION) * 4] + jitter).reshape(
+        logit = F.normalize(theta[..., :len(DIRECTION) * 4], dim=-1) * self.logit_scale
+        direct = (logit + jitter).reshape(
             n_theta, self.n_strokes, -1, len(DIRECTION)
         ).softmax(dim=-1).reshape(-1, self.n_strokes, len(DIRECTION) * 4)
         properties = theta[..., -len(PROPERTIES):]
@@ -75,6 +75,7 @@ class WoodlouseCharacterStrokes(AbstractGlyph):
             noise: float = .05,
             n_noise_knots: int = 6,
             smooth: int = 11,
+            snap: float = 1.,
             **kwargs
     ):
         super().__init__(
@@ -86,7 +87,7 @@ class WoodlouseCharacterStrokes(AbstractGlyph):
         self.min_scale = min_scale
         self.register_buffer("smooth", torch.ones(smooth) / float(smooth))
         self.register_buffer("direction_vector", torch.tensor([-1, 0, 1]))
-        self.register_buffer("snap", torch.tensor(0.))
+        self.register_buffer("snap", torch.tensor(snap))
 
     def _smooth(self, points: torch.Tensor) -> torch.Tensor:
         x_ = torch.nn.functional.pad(

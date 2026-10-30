@@ -119,7 +119,7 @@ def main(args):
                     )
                     pg = model.character(glyph, topology=topology, n_points=n_points)
                     for i_gfd, glyph_for_drawing in enumerate(pg.transpose(0, 1)):
-                        if not (~batch["masks"].bool())[0, i_gfd]:
+                        if not (~result_dict[glyph_level.replace("glyph_", "deplex_mask_")].bool())[0, i_gfd]:
                             logger.info(f"Finished drawing level {LEVEL_NAMES[level]}")
                             break
                         for i_glyph, rg in enumerate(glyph_for_drawing):

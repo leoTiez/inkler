@@ -33,9 +33,9 @@ class Pooler(torch.nn.Module):
             self,
             d_model: int,
             pooling: str = "amax",
-            min_logsumexp: float = 1e-6,
-            min_temperature: float = .05,
-            max_temperature: float = 10.
+            min_logsumexp: float = 1e-5,
+            min_temperature: float = .1,
+            max_temperature: float = 5.
     ):
         super(Pooler, self).__init__()
         self.d_model = d_model
@@ -130,7 +130,7 @@ class Unpooler(torch.nn.Module):
             d_model: int,
             init_shift: float = -10.,
             max_children: int = 50000,
-            dropout: float = 0.25,
+            dropout: float = 0.0,
     ):
         super().__init__()
         self.d_model = d_model
@@ -161,7 +161,7 @@ class Unpooler(torch.nn.Module):
         # broadcast each parent vector to all of its children, then add structural position
         out = pooled.reshape(-1, x_dim)[
               safe_parent.flatten()
-          ].reshape(batch_size, seq_len, x_dim) + self.dropout(self.pos_emb(safe_rank))
+        ].reshape(batch_size, seq_len, x_dim) + self.dropout(self.pos_emb(safe_rank))
 
         # padding / invalid positions get the learned token
         return torch.where(valid.unsqueeze(-1), out, self.token.to(out.dtype))
@@ -248,3 +248,37 @@ class AttentionWrapper(torch.nn.Module):
         mask = mask if mask is not None else torch.zeros_like(x[..., -1])
         mask = canonical_mask(mask, target_type=mask.dtype)
         return self.multihead_attn(x, x, x, key_padding_mask=mask)[0]
+
+
+class EMA(torch.nn.Module):
+    def __init__(self, d_model: int, var_min: float = 1e-3, ema_weight: float = .99):
+        super().__init__()
+        self.d_model = d_model
+        self.var_min = var_min
+        self.ema_weight = ema_weight
+        self.register_buffer("is_ema_set", torch.tensor(0.))
+        self.register_buffer("ema", torch.zeros((1, 1, self.d_model)))
+        self.register_buffer("ema_std", torch.ones((1, 1, self.d_model)))
+
+    @staticmethod
+    def _update_ema(x: torch.Tensor, ema: torch.Tensor, mask: torch.Tensor, ema_weight: float):
+        feat_dim = x.shape[-1]
+        return ema * ema_weight + (1 - ema_weight) * x[~mask].reshape(-1, feat_dim).mean(0, keepdim=True).unsqueeze(0)
+
+    @staticmethod
+    def _update_ema_std(x: torch.Tensor, ema: torch.Tensor, mask: torch.Tensor, ema_weight: float):
+        feat_dim = x.shape[-1]
+        return ema * ema_weight + (1 - ema_weight) * x[~mask].reshape(-1, feat_dim).std(0, keepdim=True).unsqueeze(0)
+
+    @torch.no_grad()
+    def _update_distribution(self, x: torch.Tensor, mask: torch.Tensor):
+        if self.training:
+            ema_weight = self.ema_weight if (self.is_ema_set == 1.).all() else 0.
+            self.is_ema_set = torch.tensor(1.).to(x.device)
+            self.ema = self._update_ema(x, self.ema, mask, ema_weight)
+            self.ema_std = self._update_ema_std(x, self.ema_std, mask, ema_weight).clip(min=self.var_min)
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        x_ = (x - self.ema) / self.ema_std
+        self._update_distribution(x_, mask.bool())
+        return x_

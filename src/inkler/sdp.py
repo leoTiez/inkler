@@ -2,7 +2,7 @@ import numpy as np
 from typing import Tuple, Dict, List
 import torch
 
-from inkler.modules import XCA, AttentionWrapper, Pooler, Unpooler
+from inkler.modules import XCA, AttentionWrapper, Pooler, Unpooler, EMA
 from inkler.utils import index_reduce_mps, child_order_within_parent
 from inkler.constants import BUCKETS
 
@@ -116,6 +116,8 @@ class SDPEncoderBlock(torch.nn.Module):
             n_xca: int = 2,
             n_hierarchy: int = 3,
             pooler_type: str = "amax",
+            var_min: float = 1e-4,
+            ema_weight: float = .95,
     ):
         super().__init__()
         if n_xca > n_hierarchy:
@@ -144,6 +146,18 @@ class SDPEncoderBlock(torch.nn.Module):
             *struture_embedding,
             *st_layers
         ])
+
+        self.ema_forward = torch.nn.ModuleList([EMA(
+            self.d_model,
+            var_min=var_min,
+            ema_weight=ema_weight
+        ) for _ in range(self.n_hierarchy + 1)])
+
+        self.ema_backward = torch.nn.ModuleList([EMA(
+            self.d_model,
+            var_min=var_min,
+            ema_weight=ema_weight
+        ) for _ in range(self.n_hierarchy + 1)])
 
         self.register_buffer(
             "pe",
@@ -193,8 +207,9 @@ class SDPEncoderBlock(torch.nn.Module):
             hierarchy: torch.Tensor,
             attention_mask: torch.Tensor,
             mask_hierarchy: bool = False,
-    ) -> Tuple[torch.Tensor, Dict[int, torch.Tensor], List[torch.Tensor], Dict[int, torch.Tensor]]:
-        out_embedding = {}
+    ) -> Tuple[torch.Tensor, Dict[int, torch.Tensor], List[torch.Tensor], Dict[int, torch.Tensor], Dict[str, torch.Tensor]]:
+        out_embedding = {-1: self.ema_forward[0](x, attention_mask)}
+        out_agg = {"agg_-1": self.ema_backward[0](x, attention_mask)}  # untrained weak reconstruction target
         deplex_idx, deplex_mask = [], {}
         hid_idx = []
         if attention_mask.is_floating_point():
@@ -217,10 +232,33 @@ class SDPEncoderBlock(torch.nn.Module):
                 hid,
                 mask=attention_mask_,
             )
+            # x = self.ema_forward[i_d + 1](x, mask=attention_mask_)
             deplex_idx.append(demu_idx.clone())
             deplex_mask[i_d] = attention_mask_.clone()
             out_embedding[i_d] = x.clone()
-            # adapt hierarchy ids to new layout
+
+            # aggregate for unbiased centered target
+            agg_ = -torch.ones_like(x).reshape(-1, self.d_model)
+            min_val = torch.where(~deplex_mask[i_d - 1], hid, torch.inf).min(-1)[0].to(torch.int)
+            add_idx = -min_val.reshape(-1, 1) + torch.arange(
+                x.shape[0],
+                device=x.device,
+            ).reshape(-1, 1) * x.shape[1]
+            collate_idx = torch.where(~deplex_mask[i_d - 1], hid + add_idx, -1).to(torch.int)
+            agg_, _ = index_reduce_mps(
+                input=agg_,
+                dim=0,
+                index=collate_idx.flatten(),
+                source=out_agg[f"agg_{i_d - 1}"].reshape(-1, self.d_model).detach(),
+                reduce="mean",
+                include_self=False,
+                mask=~deplex_mask[i_d - 1].flatten(),
+                return_idx=False
+            )
+            agg = agg_.reshape(x.shape)
+            agg = self.ema_backward[i_d + 1](agg, attention_mask_)
+            out_agg[f"agg_{i_d}"] = agg.detach()
+
             if i_d < len(self.st_layers) - 1:
                 # compute offset and collation as for the pooling but mus be performed over unchanged attention masl
                 hid_ = -torch.ones(np.prod(x.shape[:2]), device=x.device)
@@ -243,8 +281,9 @@ class SDPEncoderBlock(torch.nn.Module):
                 )
                 hid = hid_.reshape(x.shape[:2])
                 hid_idx.append(hid.clone())
+
         # return sentence embedding and class token
-        return x, out_embedding, deplex_idx, deplex_mask
+        return x, out_embedding, deplex_idx, deplex_mask, out_agg
 
 
 class SDPDecoderBlock(torch.nn.Module):
@@ -256,6 +295,7 @@ class SDPDecoderBlock(torch.nn.Module):
             dropout: float = .1,
             n_xca: int = 2,
             n_hierarchy: int = 3,
+            skip_dropout: float = .8
     ):
         super().__init__()
         if n_xca > n_hierarchy:
@@ -284,12 +324,16 @@ class SDPDecoderBlock(torch.nn.Module):
         ])
 
         self.unpool = Unpooler(d_model)
+        self.skip_norm_pre = torch.nn.LayerNorm(d_model)
+        self.norm_x = torch.nn.LayerNorm(d_model)
+        self.skip_dropout = skip_dropout
 
     def forward(
             self,
             x: torch.Tensor,
             deplex_idx: List[torch.Tensor],
             deplex_mask: List[torch.Tensor],
+            encode_x: Dict[int, torch.Tensor],
             hierarchy_x: torch.Tensor,
             mask_hierarchy: bool = False
     ):
@@ -301,12 +345,16 @@ class SDPDecoderBlock(torch.nn.Module):
             attn_mask = deplex_mask[i_d - 1]
             seq_len = demulidx.shape[0] // batch_size
 
+            # skip connection
+            if (torch.rand(1) > self.skip_dropout).all():
+                x = (self.skip_norm_pre(encode_x[i_d]) + self.norm_x(x)) / 2.
+            else:
+                x = self.norm_x(x)
+
             deplex_x = self.unpool(
                 pooled=x,
                 seq_len=seq_len,
-                # max_indices=demulidx,
                 hierarchy_idx=demulidx,
-                # mask=demulmask
                 mask=attn_mask
             )
 
@@ -340,11 +388,6 @@ class StructuralDocumentProcessor(torch.nn.Module):
             raise ValueError("n_blocks must be a positive integer")
         self.n_blocks = n_blocks
 
-        self.register_buffer("ema_sentence_set", torch.tensor(0.))
-        self.register_buffer("ema_document_set", torch.tensor(0.))
-        self.register_buffer("ema_sentence", torch.zeros((1, 1, self.d_model)))
-        self.register_buffer("ema_document", torch.zeros((1, 1, self.d_model)))
-        self.ema_weight = ema_weight
         self.sdp_blocks = torch.nn.ModuleList([
                 SDPEncoderBlock(
                     d_model=self.d_model,
@@ -357,25 +400,6 @@ class StructuralDocumentProcessor(torch.nn.Module):
                 ) for _ in range(self.n_blocks)
         ])
 
-    @staticmethod
-    def _update_ema(x: torch.Tensor, ema: torch.Tensor, mask: torch.Tensor, ema_weight: float):
-        feat_dim = x.shape[-1]
-        return ema * ema_weight + (1 - ema_weight) * x[~mask].reshape(-1, feat_dim).mean(0, keepdim=True).unsqueeze(0)
-
-    @torch.no_grad()
-    def _update_sentence_ema(self, x: torch.Tensor, mask: torch.Tensor):
-        if self.training:
-            ema_weight = self.ema_weight if (self.ema_sentence_set == 1.).all() else 0.
-            self.ema_sentence_set = torch.tensor(1.).to(x.device)
-            self.ema_sentence = self._update_ema(x, self.ema_sentence, mask, ema_weight)
-
-    @torch.no_grad()
-    def _update_document_ema(self, x: torch.Tensor, mask: torch.Tensor):
-        if self.training:
-            ema_weight = self.ema_weight if (self.ema_document_set == 1.).all() else 0.
-            self.ema_document_set = torch.tensor(1.).to(x.device)
-            self.ema_document = self._update_ema(x, self.ema_document, mask, ema_weight)
-
     def forward(
             self,
             x: torch.Tensor,
@@ -387,26 +411,18 @@ class StructuralDocumentProcessor(torch.nn.Module):
             attention_mask = torch.zeros(x.shape[:2], device=x.device, dtype=torch.bool)
         x_std = x.std(dim=-1, keepdim=True)
         x = (x - x.mean(dim=-1, keepdim=True)) / torch.where(x_std > 0, x_std, torch.ones_like(x_std))
-        self._update_sentence_ema(x, attention_mask.bool())
-        x = x - self.ema_sentence
-        level_dict, deplex_idx, deplex_hid, deplex_mask = None, None, None, None
+        init_x = x.clone()
+        level_dict, deplex_idx, deplex_hid, deplex_mask, agg_dict = None, None, None, None, None
         for i_block, sdp_block in enumerate(self.sdp_blocks):
             # x is new sentence embedding, hierarchy_x is new class token
-            hierarchy_x, level_dict, deplex_idx, deplex_mask = sdp_block(
-                x,
+            hierarchy_x, level_dict, deplex_idx, deplex_mask, agg_dict = sdp_block(
+                init_x,
                 hierarchy_x,
                 hierarchy,
                 attention_mask,
                 mask_hierarchy=i_block == 0
             )
-
-        level_dict[-1] = x.clone()
-        document_key = max(level_dict.keys())
-        batch_size = hierarchy_x.shape[0]
-        self._update_document_ema(hierarchy_x, torch.zeros(batch_size, 1, dtype=torch.bool, device=x.device))
-        hierarchy_x = hierarchy_x - self.ema_document
-        level_dict[document_key] = hierarchy_x.clone()
-        return hierarchy_x, level_dict, deplex_idx, deplex_mask
+        return hierarchy_x, level_dict, deplex_idx, deplex_mask, agg_dict
 
 
 class StructuralDocumentDecoder(torch.nn.Module):
@@ -443,7 +459,8 @@ class StructuralDocumentDecoder(torch.nn.Module):
 
     def forward(
             self,
-            x: Dict[int, torch.Tensor],
+            x: torch.Tensor,
+            encode_x: Dict[int, torch.Tensor],
             deplex_idx: List[torch.Tensor],
             deplex_mask: List[torch.Tensor],
             hierarchy_x: torch.Tensor,
@@ -456,6 +473,7 @@ class StructuralDocumentDecoder(torch.nn.Module):
                 deplex_idx=deplex_idx,
                 deplex_mask=deplex_mask,
                 hierarchy_x=hierarchy_x,
+                encode_x=encode_x,
                 mask_hierarchy=True
             )
 

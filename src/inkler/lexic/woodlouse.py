@@ -32,6 +32,7 @@ class WoodlouseInklerGlyph(torch.nn.Module):
             torch.nn.GELU(),
             torch.nn.Linear(256, self.n_strokes * (len(DIRECTION) * 4 + len(PROPERTIES)))
         )
+        self.logit_scale = len(DIRECTION) * 4
         self.register_buffer("temperature", torch.tensor(1.))
 
     def forward(self, z):
@@ -43,7 +44,8 @@ class WoodlouseInklerGlyph(torch.nn.Module):
             jitter = torch.zeros_like(theta[..., :len(DIRECTION) * 4])
         # circle line hook activation
         n_theta = theta.shape[0]
-        direct = (theta[..., :len(DIRECTION) * 4] + jitter).reshape(
+        logit = F.normalize(theta[..., :len(DIRECTION) * 4], dim=-1) * self.logit_scale
+        direct = (logit + jitter).reshape(
             n_theta, self.n_strokes, -1, len(DIRECTION)
         ).softmax(dim=-1).reshape(-1, self.n_strokes, len(DIRECTION) * 4)
         properties = theta[..., -len(PROPERTIES):]
@@ -85,7 +87,7 @@ class WoodlouseCharacterStrokes(AbstractGlyph):
         self.min_scale = min_scale
         self.register_buffer("smooth", torch.ones(smooth) / float(smooth))
         self.register_buffer("direction_vector", torch.tensor([-1, 0, 1]))
-        self.snap = snap
+        self.register_buffer("snap", torch.tensor(snap))
 
     def _smooth(self, points: torch.Tensor) -> torch.Tensor:
         x_ = torch.nn.functional.pad(

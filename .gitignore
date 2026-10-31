@@ -10,3 +10,6 @@ data
 .DS_Store
 jupyter
 script
+src/inkler/lexic/__pycache__/
+glyphs
+documents

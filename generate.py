@@ -6,6 +6,7 @@ import logging
 import argparse
 from pathlib import Path
 import shutil
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import torch.autograd
 from tqdm import tqdm
@@ -51,7 +52,27 @@ def parse_args(args):
         required=True,
         help="Path to output directory"
     )
+    parser.add_argument(
+        "--n_jobs",
+        type=int,
+        default=1,
+        help="Number of processes to run in parallel"
+    )
     return parser.parse_args(args)
+
+
+def _save_svg_worker(coords_np, out_path):
+    """
+    Worker function executed in a separate process.
+    Uses pure Object-Oriented Matplotlib without pyplot overhead.
+    """
+    fig = plt.Figure(figsize=(2, 2), frameon=False)
+    # add_axes([0, 0, 1, 1]) fills the entire canvas, eliminating the need for tight_layout()
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.axis("off")
+    ax.plot(*coords_np, color="black")
+    fig.savefig(out_path, format="svg", transparent=True)
+
 
 def main(args):
     cnsl = logging.StreamHandler()
@@ -66,46 +87,49 @@ def main(args):
     train_path = args.yaml_path
     out_dir = args.out_dir
     n_points = args.n_points
-    if not os.path.isfile(train_path):
-        raise FileNotFoundError("Training yaml file not found")
+    n_jobs = args.n_jobs
+    with ProcessPoolExecutor(max_workers=n_jobs) as executor, torch.no_grad():
 
-    with open(train_path, "r") as yaml_file:
-        train_dict = yaml.load(yaml_file, Loader=yaml.FullLoader)
+        if not os.path.isfile(train_path):
+            raise FileNotFoundError("Training yaml file not found")
 
-    model = Inkler.load_from_checkpoint(
-        model_path,
-        lr=train_dict["train"]["lr"],
-        optim_params=train_dict["train"].get("optim_params", None),
-        scheduler_params=train_dict["train"].get("scheduler_params", None),
-        warmup_params=train_dict["train"].get("warmup_params", None),
-        **train_dict["model"]
-    ).eval()
-    logger.info(f"Loaded Inkler from checkpoint at path {model_path}")
+        with open(train_path, "r") as yaml_file:
+            train_dict = yaml.load(yaml_file, Loader=yaml.FullLoader)
 
-    Path(out_dir).mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(train_path, os.path.join(out_dir, "config.yaml"))
-    out_dir = os.path.join(out_dir, "glyphs")
-    Path(out_dir).mkdir(parents=True, exist_ok=True)
+        model = Inkler.load_from_checkpoint(
+            model_path,
+            lr=train_dict["train"]["lr"],
+            optim_params=train_dict["train"].get("optim_params", None),
+            scheduler_params=train_dict["train"].get("scheduler_params", None),
+            warmup_params=train_dict["train"].get("warmup_params", None),
+            **train_dict["model"]
+        ).eval()
+        logger.info(f"Loaded Inkler from checkpoint at path {model_path}")
 
-    for dataset in DATASETS:
-        logger.info(f"Loading book dataset type {dataset}...")
-        train_dict[dataset]["batch_size"] = 1
-        dataloader = BookDataset(
-            seq_len=int(train_dict["model"]["seq_len"]),
-            in_dim=int(train_dict["model"]["d_model"]),
-            **train_dict[dataset]
-        )
-        logger.info(f"Loaded book set with {dataloader.n_books} entries")
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(train_path, os.path.join(out_dir, "config.yaml"))
+        out_dir = os.path.join(out_dir, "glyphs")
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
 
-        logger.info("Start generating glyphs...")
-        with torch.no_grad():
+        # Cache set to avoid redundant OS mkdir system calls
+        created_dirs = set()
+        for dataset in DATASETS:
+            logger.info(f"Loading book dataset type {dataset}...")
+            train_dict[dataset]["batch_size"] = 1
+            dataloader = BookDataset(
+                seq_len=int(train_dict["model"]["seq_len"]),
+                in_dim=int(train_dict["model"]["d_model"]),
+                **train_dict[dataset]
+            )
+            logger.info(f"Loaded book set with {dataloader.n_books} entries")
+            logger.info("Start generating glyphs...")
             for batch in tqdm(dataloader):
                 result_dict = model.forward(
                     x_sentence=batch["texts"],
                     hierarchy=batch["hierarchy"],
                     attention_mask=batch["masks"]
                 )
-
+                glyph_futures = []
                 val_glyphs = {key: val for key, val in result_dict.items() if "glyph" in key}
                 for glyph_level, glyph in val_glyphs.items():
                     try:
@@ -118,24 +142,36 @@ def main(args):
                         use_connector_stroke=True,
                     )
                     pg = model.character(glyph, topology=topology, n_points=n_points)
+                    deplex_mask = result_dict.get(glyph_level.replace("glyph_", "deplex_mask_"))
+
                     for i_gfd, glyph_for_drawing in enumerate(pg.transpose(0, 1)):
-                        if not (~result_dict[glyph_level.replace("glyph_", "deplex_mask_")].bool())[0, i_gfd]:
+                        if deplex_mask is not None and not (~deplex_mask.bool())[0, i_gfd]:
                             logger.info(f"Finished drawing level {LEVEL_NAMES[level]}")
                             break
                         for i_glyph, rg in enumerate(glyph_for_drawing):
                             glyph_out =  f"{"_".join(batch["titles"][i_glyph].split(" "))}_BY_{
                                 "_".join(batch["authors"][i_glyph].split(" "))}"
-                            Path(os.path.join(out_dir, glyph_out)).mkdir(parents=True, exist_ok=True)
+
+                            sub_dir = os.path.join(out_dir, glyph_out)
+                            if sub_dir not in created_dirs:
+                                Path(sub_dir).mkdir(parents=True, exist_ok=True)
+                                created_dirs.add(sub_dir)
+
                             save_name = f"level_{LEVEL_NAMES[level]}_{i_gfd}.svg"
-                            fig, ax = plt.subplots(1, 1, figsize=(5, 5))
-                            ax.plot(*rg.permute(2, 1, 0).detach().cpu().numpy(), color="black")
-                            ax.axis("off")
-                            fig.tight_layout()
-                            fig.savefig(f"{out_dir}/{glyph_out}/{save_name}")
-                            plt.close(fig)
+                            save_path = os.path.join(sub_dir, save_name)
+                            if os.path.exists(save_path):
+                                continue
+                            lines = rg[~(rg[:, 1:].flatten(1) == rg[:, :-1].flatten(1)).all(-1)].permute(2, 1, 0).detach().cpu().numpy()
+                            glyph_futures.append(executor.submit(_save_svg_worker, lines, save_path))
+
                         # clear
                         del glyph_for_drawing
+                # Wait for all pending SVG writes to finish for this dataset
+                for gf in as_completed(glyph_futures):
+                    gf.result()
+
                 plt.close("all")
+
 
 
 if __name__ == "__main__":

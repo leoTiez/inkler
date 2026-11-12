@@ -159,6 +159,8 @@ def main(args):
 
                             save_name = f"level_{LEVEL_NAMES[level]}_{i_gfd}.svg"
                             save_path = os.path.join(sub_dir, save_name)
+                            if os.path.exists(save_path):
+                                continue
                             lines = rg[~(rg[:, 1:].flatten(1) == rg[:, :-1].flatten(1)).all(-1)].permute(2, 1, 0).detach().cpu().numpy()
                             glyph_futures.append(executor.submit(_save_svg_worker, lines, save_path))
 
